@@ -274,3 +274,51 @@
     linear-gradient(90deg, rgba(0, 229, 255, 0.03) 1px, transparent 1px);
   background-size: 40px 40px;
 }
+
+/* ── iPhone safe area + fullscreen ── */
+html,
+body,
+#root {
+  height: 100%;
+  height: -webkit-fill-available;
+  background: #080f16;
+}
+
+.h-screen {
+  height: 100vh;
+  height: -webkit-fill-available;
+}
+
+/* Safe area padding for iPhone notch / home bar */
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 12px);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 8px);
+}
+
+/* Anime glitch text effect */
+@keyframes glitch {
+  0%,
+  100% {
+    text-shadow: 0 0 20px rgba(0, 194, 255, 0.6);
+  }
+  20% {
+    text-shadow:
+      -2px 0 #ef4444,
+      2px 0 #00c2ff,
+      0 0 20px rgba(0, 194, 255, 0.6);
+  }
+  40% {
+    text-shadow:
+      2px 0 #ef4444,
+      -2px 0 #00c2ff,
+      0 0 20px rgba(0, 194, 255, 0.6);
+  }
+  60% {
+    text-shadow: 0 0 20px rgba(0, 194, 255, 0.6);
+  }
+}
+.glitch-text {
+  animation: glitch 3s ease-in-out infinite;
+}

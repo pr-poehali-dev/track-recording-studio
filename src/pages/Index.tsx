@@ -631,15 +631,34 @@ const useRecorder = () => {
   const start = async (): Promise<{ url: string; duration: string; waveform: number[] } | null> => {
     setError("");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // iOS Safari requires explicit permission request with these constraints
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 44100,
+        }
+      });
       streamRef.current = stream;
-      const ctx = new AudioContext();
+
+      // iOS Safari needs AudioContext resumed after user gesture
+      const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      if (ctx.state === "suspended") await ctx.resume();
+
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 256;
       src.connect(analyser);
       analyserRef.current = analyser;
-      const mr = new MediaRecorder(stream);
+
+      // Pick best supported mimeType (iOS Safari supports audio/mp4)
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4"
+          : "";
+
+      const mr = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       mediaRecorderRef.current = mr;
       chunksRef.current = [];
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
@@ -650,8 +669,15 @@ const useRecorder = () => {
       timerRef.current = setInterval(() => { recTimeRef.current += 1; setRecTime(t => t + 1); }, 1000);
       animateVU();
       return null;
-    } catch {
-      setError("Нет доступа к микрофону");
+    } catch (err) {
+      const e = err as Error;
+      if (e.name === "NotAllowedError" || e.name === "PermissionDeniedError") {
+        setError("Разреши доступ к микрофону в настройках браузера");
+      } else if (e.name === "NotFoundError") {
+        setError("Микрофон не найден на устройстве");
+      } else {
+        setError("Не удалось начать запись. Попробуй ещё раз.");
+      }
       return null;
     }
   };
@@ -659,8 +685,9 @@ const useRecorder = () => {
   const stop = (): Promise<{ url: string; duration: string; waveform: number[] }> =>
     new Promise(resolve => {
       if (!mediaRecorderRef.current) return;
+      const mimeType = mediaRecorderRef.current.mimeType || "audio/webm";
       mediaRecorderRef.current.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const blob = new Blob(chunksRef.current, { type: mimeType });
         const url = URL.createObjectURL(blob);
         const duration = formatTime(recTimeRef.current);
         const waveform = Array.from({ length: 60 }, () => Math.random() * 80 + 10);
@@ -699,8 +726,114 @@ const useRecorder = () => {
 
 const formatTime = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
+/* ─── Anime Splash Screen ────────────────────────────────── */
+const AnimeSplash = ({ onDone }: { onDone: () => void }) => {
+  const [phase, setPhase] = useState<"intro" | "logo" | "title" | "out">("intro");
+
+  useEffect(() => {
+    const t1 = setTimeout(() => setPhase("logo"), 400);
+    const t2 = setTimeout(() => setPhase("title"), 1200);
+    const t3 = setTimeout(() => setPhase("out"), 2800);
+    const t4 = setTimeout(() => onDone(), 3400);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4); };
+  }, [onDone]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex flex-col items-center justify-center overflow-hidden"
+      style={{
+        background: "#020609",
+        opacity: phase === "out" ? 0 : 1,
+        transition: phase === "out" ? "opacity 0.6s ease-in" : "none",
+      }}
+    >
+      {/* Scanlines overlay */}
+      <div className="absolute inset-0 pointer-events-none" style={{
+        backgroundImage: "repeating-linear-gradient(0deg, rgba(0,194,255,0.03) 0px, rgba(0,194,255,0.03) 1px, transparent 1px, transparent 3px)",
+      }} />
+
+      {/* Glitch grid */}
+      <div className="absolute inset-0 pointer-events-none" style={{
+        backgroundImage: "linear-gradient(rgba(0,194,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(0,194,255,0.04) 1px, transparent 1px)",
+        backgroundSize: "32px 32px",
+      }} />
+
+      {/* Corner accents */}
+      {[["top-4 left-4", "border-t-2 border-l-2"], ["top-4 right-4", "border-t-2 border-r-2"], ["bottom-4 left-4", "border-b-2 border-l-2"], ["bottom-4 right-4", "border-b-2 border-r-2"]].map(([pos, border], i) => (
+        <div key={i} className={`absolute ${pos} w-8 h-8 ${border}`} style={{ borderColor: "#00c2ff", opacity: phase === "intro" ? 0 : 0.6, transition: "opacity 0.4s ease" }} />
+      ))}
+
+      {/* Logo */}
+      <div style={{
+        opacity: phase === "intro" ? 0 : 1,
+        transform: phase === "intro" ? "scale(0.3)" : phase === "out" ? "scale(1.15)" : "scale(1)",
+        transition: "opacity 0.5s ease, transform 0.5s cubic-bezier(0.34,1.56,0.64,1)",
+      }}>
+        <div className="relative">
+          {/* Glow ring */}
+          <div className="absolute inset-0 rounded-full" style={{
+            background: "radial-gradient(circle, rgba(0,194,255,0.25) 0%, transparent 70%)",
+            transform: "scale(2)",
+            animation: phase === "logo" || phase === "title" ? "glow-pulse 1.5s ease-in-out infinite" : "none",
+          }} />
+          <img
+            src="https://cdn.poehali.dev/projects/aa1808ba-e45f-437c-8925-20682e9a577e/files/3fa43031-b9e1-40e6-997b-435e174180c5.jpg"
+            alt="cheburek"
+            className="w-28 h-28 rounded-3xl object-cover relative z-10"
+            style={{ border: "3px solid #00c2ff", boxShadow: "0 0 32px rgba(0,194,255,0.5), 0 0 64px rgba(0,194,255,0.2)" }}
+          />
+        </div>
+      </div>
+
+      {/* Title */}
+      <div className="mt-8 text-center" style={{
+        opacity: phase === "title" || phase === "out" ? 1 : 0,
+        transform: phase === "title" || phase === "out" ? "translateY(0)" : "translateY(20px)",
+        transition: "opacity 0.5s ease 0.1s, transform 0.5s ease 0.1s",
+      }}>
+        <div className="glitch-text font-bold tracking-[0.2em] uppercase mb-1" style={{
+          fontFamily: "Oswald, sans-serif",
+          fontSize: "clamp(1.8rem, 6vw, 2.6rem)",
+          color: "#e2f4ff",
+        }}>
+          CHEBUR<span style={{ color: "#00c2ff" }}>EK</span>STUDIO
+        </div>
+        <div className="font-mono text-xs tracking-[0.3em] uppercase" style={{ color: "#00c2ff", opacity: 0.7 }}>
+          ▸ REC MODE ONLINE ▸
+        </div>
+      </div>
+
+      {/* Bottom bar */}
+      <div className="absolute bottom-10 left-8 right-8" style={{
+        opacity: phase === "title" || phase === "out" ? 1 : 0,
+        transition: "opacity 0.4s ease 0.3s",
+      }}>
+        <div className="h-px w-full mb-2" style={{ background: "linear-gradient(90deg, transparent, #00c2ff, transparent)" }} />
+        <div className="flex justify-between font-mono text-[10px]" style={{ color: "#1e4060" }}>
+          <span>SYS_BOOT v2.0</span>
+          <span>AUDIO ENGINE READY</span>
+          <span>44.1kHz / 32bit</span>
+        </div>
+      </div>
+
+      {/* Loading bar */}
+      <div className="absolute bottom-6 left-8 right-8 h-0.5 rounded-full overflow-hidden" style={{ background: "#0d1e2c" }}>
+        <div style={{
+          height: "100%",
+          background: "linear-gradient(90deg, #00c2ff, #7c3aed)",
+          borderRadius: 999,
+          width: phase === "intro" ? "0%" : phase === "logo" ? "50%" : "100%",
+          transition: "width 0.8s ease",
+          boxShadow: "0 0 8px #00c2ff",
+        }} />
+      </div>
+    </div>
+  );
+};
+
 /* ─── Main App ───────────────────────────────────────────── */
 export default function Index() {
+  const [showSplash, setShowSplash] = useState(true);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -716,8 +849,6 @@ export default function Index() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const recorder = useRecorder();
-
-  const activeTrack = tracks.find(t => t.id === activeTrackId);
 
   // Rename
   const [renamingId, setRenamingId] = useState<number | null>(null);
@@ -868,6 +999,8 @@ export default function Index() {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden select-none" style={{ background: "#080f16", color: "#e2f4ff", fontFamily: "IBM Plex Sans, sans-serif", maxWidth: 480, margin: "0 auto" }}>
+
+      {showSplash && <AnimeSplash onDone={() => setShowSplash(false)} />}
 
       {/* ── Top Bar ── */}
       <div className="flex-shrink-0 flex items-center justify-between px-4 pt-safe pb-2 pt-3" style={{ background: "#0a1520", borderBottom: "1px solid #0d1e2c" }}>
