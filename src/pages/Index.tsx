@@ -521,47 +521,311 @@ const AddTrackSheet = ({ onClose, onAdd, onImport }: {
   </div>
 );
 
-/* ─── FX Sheet ───────────────────────────────────────────── */
-const fxList = [
-  { name: "Reverb", icon: "Waves", color: "#00c2ff" },
-  { name: "Delay", icon: "Clock", color: "#7c3aed" },
-  { name: "Компрессор", icon: "Activity", color: "#10b981" },
-  { name: "EQ", icon: "BarChart2", color: "#f59e0b" },
-  { name: "Chorus", icon: "Radio", color: "#ec4899" },
-  { name: "AutoPitch", icon: "TrendingUp", color: "#ef4444" },
+/* ─── Real FX Engine ─────────────────────────────────────── */
+interface FxParams {
+  reverb: { mix: number; decay: number };
+  delay: { time: number; feedback: number; mix: number };
+  compressor: { threshold: number; ratio: number; attack: number; release: number };
+  eq: { low: number; mid: number; high: number };
+  chorus: { rate: number; depth: number; mix: number };
+}
+
+const DEFAULT_FX: FxParams = {
+  reverb:     { mix: 0.4, decay: 2.5 },
+  delay:      { time: 0.35, feedback: 0.4, mix: 0.3 },
+  compressor: { threshold: -24, ratio: 4, attack: 0.003, release: 0.25 },
+  eq:         { low: 0, mid: 0, high: 0 },
+  chorus:     { rate: 1.5, depth: 0.003, mix: 0.4 },
+};
+
+// Creates impulse response for convolution reverb
+function makeImpulse(ctx: AudioContext, duration: number, decay: number) {
+  const length = ctx.sampleRate * duration;
+  const buf = ctx.createBuffer(2, length, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const data = buf.getChannelData(c);
+    for (let i = 0; i < length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+    }
+  }
+  return buf;
+}
+
+interface FxChain {
+  input: AudioNode;
+  output: AudioNode;
+  nodes: {
+    reverb?: ConvolverNode;
+    reverbGain?: GainNode;
+    dryGain?: GainNode;
+    delay?: DelayNode;
+    delayFeedback?: GainNode;
+    delayMix?: GainNode;
+    compressor?: DynamicsCompressorNode;
+    lowEq?: BiquadFilterNode;
+    midEq?: BiquadFilterNode;
+    highEq?: BiquadFilterNode;
+    chorusOsc?: OscillatorNode;
+    chorusDelay?: DelayNode;
+    chorusMix?: GainNode;
+  };
+}
+
+function buildFxChain(ctx: AudioContext, active: string[], params: FxParams): FxChain {
+  const input = ctx.createGain();
+  let current: AudioNode = input;
+  const nodes: FxChain["nodes"] = {};
+
+  // EQ
+  if (active.includes("EQ")) {
+    const low = ctx.createBiquadFilter(); low.type = "lowshelf"; low.frequency.value = 200; low.gain.value = params.eq.low;
+    const mid = ctx.createBiquadFilter(); mid.type = "peaking"; mid.frequency.value = 1000; mid.Q.value = 1; mid.gain.value = params.eq.mid;
+    const high = ctx.createBiquadFilter(); high.type = "highshelf"; high.frequency.value = 4000; high.gain.value = params.eq.high;
+    current.connect(low); low.connect(mid); mid.connect(high);
+    nodes.lowEq = low; nodes.midEq = mid; nodes.highEq = high;
+    current = high;
+  }
+
+  // Compressor
+  if (active.includes("Компрессор")) {
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = params.compressor.threshold;
+    comp.ratio.value = params.compressor.ratio;
+    comp.attack.value = params.compressor.attack;
+    comp.release.value = params.compressor.release;
+    current.connect(comp);
+    nodes.compressor = comp;
+    current = comp;
+  }
+
+  // Chorus
+  if (active.includes("Chorus")) {
+    const chorusDelay = ctx.createDelay(0.05);
+    chorusDelay.delayTime.value = params.chorus.depth;
+    const chorusOsc = ctx.createOscillator();
+    chorusOsc.frequency.value = params.chorus.rate;
+    const depthGain = ctx.createGain(); depthGain.gain.value = params.chorus.depth;
+    chorusOsc.connect(depthGain); depthGain.connect(chorusDelay.delayTime);
+    const chorusMix = ctx.createGain(); chorusMix.gain.value = params.chorus.mix;
+    current.connect(chorusDelay); chorusDelay.connect(chorusMix);
+    chorusOsc.start();
+    nodes.chorusOsc = chorusOsc; nodes.chorusDelay = chorusDelay; nodes.chorusMix = chorusMix;
+    // merge dry+chorus into a merge gain
+    const merge = ctx.createGain();
+    current.connect(merge); chorusMix.connect(merge);
+    current = merge;
+  }
+
+  // Delay
+  if (active.includes("Delay")) {
+    const delayNode = ctx.createDelay(1.0);
+    delayNode.delayTime.value = params.delay.time;
+    const feedback = ctx.createGain(); feedback.gain.value = params.delay.feedback;
+    const delayMix = ctx.createGain(); delayMix.gain.value = params.delay.mix;
+    delayNode.connect(feedback); feedback.connect(delayNode);
+    current.connect(delayNode); delayNode.connect(delayMix);
+    nodes.delay = delayNode; nodes.delayFeedback = feedback; nodes.delayMix = delayMix;
+    const merge = ctx.createGain();
+    current.connect(merge); delayMix.connect(merge);
+    current = merge;
+  }
+
+  // Reverb (convolver)
+  if (active.includes("Reverb")) {
+    const conv = ctx.createConvolver();
+    conv.buffer = makeImpulse(ctx, params.reverb.decay, 2);
+    const reverbGain = ctx.createGain(); reverbGain.gain.value = params.reverb.mix;
+    const dryGain = ctx.createGain(); dryGain.gain.value = 1 - params.reverb.mix;
+    current.connect(conv); conv.connect(reverbGain);
+    current.connect(dryGain);
+    nodes.reverb = conv; nodes.reverbGain = reverbGain; nodes.dryGain = dryGain;
+    const merge = ctx.createGain();
+    reverbGain.connect(merge); dryGain.connect(merge);
+    current = merge;
+  }
+
+  return { input, output: current, nodes };
+}
+
+/* ─── FX Sheet (реальные эффекты) ───────────────────────── */
+const fxDefs = [
+  { id: "Reverb",     icon: "Waves",     color: "#00c2ff", label: "Reverb"   },
+  { id: "Delay",      icon: "Clock",     color: "#7c3aed", label: "Delay"    },
+  { id: "Компрессор", icon: "Activity",  color: "#10b981", label: "Комп."    },
+  { id: "EQ",         icon: "BarChart2", color: "#f59e0b", label: "EQ"       },
+  { id: "Chorus",     icon: "Radio",     color: "#ec4899", label: "Chorus"   },
+  { id: "AutoPitch",  icon: "TrendingUp",color: "#ef4444", label: "AutoPitch"},
 ];
 
-const FxSheet = ({ trackName, onClose }: { trackName: string; onClose: () => void }) => {
-  const [active, setActive] = useState<string[]>(["Reverb"]);
+const FxSheet = ({
+  trackName, trackUrl, onClose, onFxChange,
+}: {
+  trackName: string;
+  trackUrl?: string;
+  onClose: () => void;
+  onFxChange: (active: string[], params: FxParams) => void;
+}) => {
+  const [active, setActive] = useState<string[]>([]);
+  const [params, setParams] = useState<FxParams>(DEFAULT_FX);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const previewCtxRef = useRef<AudioContext | null>(null);
+  const previewSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  const stopPreview = () => {
+    previewSourceRef.current?.stop();
+    previewSourceRef.current = null;
+    previewCtxRef.current?.close();
+    previewCtxRef.current = null;
+    setPreviewPlaying(false);
+  };
+
+  const playPreview = async () => {
+    if (previewPlaying) { stopPreview(); return; }
+    if (!trackUrl) return;
+    try {
+      const ctx = new AudioContext();
+      previewCtxRef.current = ctx;
+      const resp = await fetch(trackUrl);
+      const arrBuf = await resp.arrayBuffer();
+      const audioBuf = await ctx.decodeAudioData(arrBuf);
+      const chain = buildFxChain(ctx, active, params);
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(chain.input);
+      chain.output.connect(ctx.destination);
+      src.start();
+      src.onended = () => { stopPreview(); };
+      previewSourceRef.current = src;
+      setPreviewPlaying(true);
+    } catch { stopPreview(); }
+  };
+
+  const toggle = (id: string) => {
+    const next = active.includes(id) ? active.filter(x => x !== id) : [...active, id];
+    setActive(next);
+    onFxChange(next, params);
+  };
+
+  const updateParam = (patch: Partial<FxParams>) => {
+    const next = { ...params, ...patch };
+    setParams(next);
+    onFxChange(active, next);
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.75)" }} onClick={onClose}>
-      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0f1923" }} onClick={e => e.stopPropagation()}>
-        <div className="flex justify-center pt-3 pb-2"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
-        <div className="px-5 pb-3 flex items-center justify-between">
-          <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>
-            +FX — {trackName}
-          </span>
-          <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
-        </div>
-        <div className="grid grid-cols-3 gap-3 px-4 pb-8">
-          {fxList.map(fx => {
-            const on = active.includes(fx.name);
-            return (
-              <button key={fx.name} onClick={() => setActive(v => on ? v.filter(x => x !== fx.name) : [...v, fx.name])}
-                className="flex flex-col items-center gap-2 p-4 rounded-2xl transition-all"
-                style={{ background: on ? fx.color + "22" : "#141e28", border: `1px solid ${on ? fx.color : "#1e2d3a"}` }}>
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: on ? fx.color : "#1e2d3a" }}>
-                  <Icon name={fx.icon} size={18} style={{ color: on ? "#fff" : "#4a6070" }} />
-                </div>
-                <span className="text-xs font-semibold" style={{ color: on ? fx.color : "#7ab" }}>{fx.name}</span>
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.8)" }} onClick={onClose}>
+      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0a1520", maxHeight: "82vh" }} onClick={e => e.stopPropagation()}>
+        <div className="flex justify-center pt-3 pb-1"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+        <div className="px-5 py-3 flex items-center justify-between">
+          <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>FX — {trackName}</span>
+          <div className="flex items-center gap-2">
+            {trackUrl && (
+              <button onClick={playPreview}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all"
+                style={{ background: previewPlaying ? "rgba(0,230,118,0.2)" : "#0d1e2c", color: previewPlaying ? "#00e676" : "#7ab", border: `1px solid ${previewPlaying ? "#00e676" : "#1e3040"}` }}>
+                <Icon name={previewPlaying ? "Square" : "Play"} size={12} />
+                {previewPlaying ? "Стоп" : "Слушать"}
               </button>
-            );
-          })}
+            )}
+            <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
+          </div>
+        </div>
+
+        <div className="overflow-y-auto px-4 pb-6" style={{ maxHeight: "65vh" }}>
+          {/* FX grid */}
+          <div className="grid grid-cols-3 gap-2 mb-4">
+            {fxDefs.map(fx => {
+              const on = active.includes(fx.id);
+              return (
+                <div key={fx.id}>
+                  <button
+                    onClick={() => { toggle(fx.id); setExpanded(on ? null : fx.id); }}
+                    className="w-full flex flex-col items-center gap-2 py-3 px-2 rounded-2xl transition-all"
+                    style={{ background: on ? fx.color + "22" : "#141e28", border: `1.5px solid ${on ? fx.color : "#1e2d3a"}`, boxShadow: on ? `0 0 12px ${fx.color}33` : "none" }}>
+                    <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: on ? fx.color : "#1e2d3a" }}>
+                      <Icon name={fx.icon} size={18} style={{ color: on ? "#fff" : "#4a6070" }} />
+                    </div>
+                    <span className="text-xs font-bold" style={{ color: on ? fx.color : "#4a6070" }}>{fx.label}</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Expanded params */}
+          {expanded === "Reverb" && active.includes("Reverb") && (
+            <div className="rounded-2xl p-4 mb-3 space-y-3" style={{ background: "#0d1e2c", border: "1px solid #00c2ff33" }}>
+              <p className="text-xs font-mono uppercase" style={{ color: "#00c2ff" }}>Reverb</p>
+              <SliderRow label="Mix" value={params.reverb.mix} min={0} max={1} step={0.01}
+                onChange={v => updateParam({ reverb: { ...params.reverb, mix: v } })} color="#00c2ff" />
+              <SliderRow label="Decay" value={params.reverb.decay} min={0.3} max={8} step={0.1}
+                onChange={v => updateParam({ reverb: { ...params.reverb, decay: v } })} color="#00c2ff" />
+            </div>
+          )}
+          {expanded === "Delay" && active.includes("Delay") && (
+            <div className="rounded-2xl p-4 mb-3 space-y-3" style={{ background: "#0d1e2c", border: "1px solid #7c3aed33" }}>
+              <p className="text-xs font-mono uppercase" style={{ color: "#7c3aed" }}>Delay</p>
+              <SliderRow label="Time" value={params.delay.time} min={0.05} max={1} step={0.01}
+                onChange={v => updateParam({ delay: { ...params.delay, time: v } })} color="#7c3aed" />
+              <SliderRow label="Feedback" value={params.delay.feedback} min={0} max={0.9} step={0.01}
+                onChange={v => updateParam({ delay: { ...params.delay, feedback: v } })} color="#7c3aed" />
+              <SliderRow label="Mix" value={params.delay.mix} min={0} max={1} step={0.01}
+                onChange={v => updateParam({ delay: { ...params.delay, mix: v } })} color="#7c3aed" />
+            </div>
+          )}
+          {expanded === "Компрессор" && active.includes("Компрессор") && (
+            <div className="rounded-2xl p-4 mb-3 space-y-3" style={{ background: "#0d1e2c", border: "1px solid #10b98133" }}>
+              <p className="text-xs font-mono uppercase" style={{ color: "#10b981" }}>Компрессор</p>
+              <SliderRow label="Threshold" value={params.compressor.threshold} min={-60} max={0} step={1}
+                onChange={v => updateParam({ compressor: { ...params.compressor, threshold: v } })} color="#10b981" />
+              <SliderRow label="Ratio" value={params.compressor.ratio} min={1} max={20} step={0.5}
+                onChange={v => updateParam({ compressor: { ...params.compressor, ratio: v } })} color="#10b981" />
+            </div>
+          )}
+          {expanded === "EQ" && active.includes("EQ") && (
+            <div className="rounded-2xl p-4 mb-3 space-y-3" style={{ background: "#0d1e2c", border: "1px solid #f59e0b33" }}>
+              <p className="text-xs font-mono uppercase" style={{ color: "#f59e0b" }}>EQ</p>
+              <SliderRow label="Низкие" value={params.eq.low} min={-12} max={12} step={0.5}
+                onChange={v => updateParam({ eq: { ...params.eq, low: v } })} color="#f59e0b" />
+              <SliderRow label="Средние" value={params.eq.mid} min={-12} max={12} step={0.5}
+                onChange={v => updateParam({ eq: { ...params.eq, mid: v } })} color="#f59e0b" />
+              <SliderRow label="Высокие" value={params.eq.high} min={-12} max={12} step={0.5}
+                onChange={v => updateParam({ eq: { ...params.eq, high: v } })} color="#f59e0b" />
+            </div>
+          )}
+          {expanded === "Chorus" && active.includes("Chorus") && (
+            <div className="rounded-2xl p-4 mb-3 space-y-3" style={{ background: "#0d1e2c", border: "1px solid #ec489933" }}>
+              <p className="text-xs font-mono uppercase" style={{ color: "#ec4899" }}>Chorus</p>
+              <SliderRow label="Rate" value={params.chorus.rate} min={0.1} max={8} step={0.1}
+                onChange={v => updateParam({ chorus: { ...params.chorus, rate: v } })} color="#ec4899" />
+              <SliderRow label="Mix" value={params.chorus.mix} min={0} max={1} step={0.01}
+                onChange={v => updateParam({ chorus: { ...params.chorus, mix: v } })} color="#ec4899" />
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 };
+
+const SliderRow = ({ label, value, min, max, step, onChange, color }: {
+  label: string; value: number; min: number; max: number; step: number;
+  onChange: (v: number) => void; color: string;
+}) => (
+  <div className="flex items-center gap-3">
+    <span className="text-xs w-16 flex-shrink-0" style={{ color: "#7ab" }}>{label}</span>
+    <div className="flex-1 relative h-4 flex items-center">
+      <div className="w-full h-1 rounded-full" style={{ background: "#1e3040" }}>
+        <div className="h-full rounded-full" style={{ width: `${((value - min) / (max - min)) * 100}%`, background: color, transition: "width 0.05s" }} />
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={e => onChange(+e.target.value)}
+        className="absolute inset-0 w-full opacity-0 cursor-pointer h-full" />
+    </div>
+    <span className="font-mono text-xs w-8 text-right flex-shrink-0" style={{ color }}>{value}</span>
+  </div>
+);
 
 /* ─── AutoPitch modal ────────────────────────────────────── */
 const AutoPitchModal = ({ onClose }: { onClose: () => void }) => {
@@ -848,11 +1112,31 @@ const AnimeSplash = ({ onDone }: { onDone: () => void }) => {
 export default function Index() {
   const [showSplash, setShowSplash] = useState(true);
   const [showCabinet, setShowCabinet] = useState(false);
+  const defaultTrackAdded = useRef(false);
   const [savedTracks, setSavedTracks] = useState<SavedTrack[]>(() => {
     try { return JSON.parse(localStorage.getItem("cheburek_saved_tracks") || "[]"); } catch { return []; }
   });
   const savedCounterRef = useRef(savedTracks.length);
-  const [tracks, setTracks] = useState<Track[]>([]);
+  const [tracks, setTracks] = useState<Track[]>(() => {
+    // Дорожка по умолчанию при первом входе
+    if (!defaultTrackAdded.current) {
+      defaultTrackAdded.current = true;
+      return [{
+        id: 1,
+        name: "Голос/Аудио",
+        color: "#ef4444",
+        icon: "Mic",
+        type: "voice",
+        hasAudio: false,
+        fx: [],
+        muted: false,
+        solo: false,
+        volume: 80,
+        waveform: Array.from({ length: 60 }, () => 0),
+      }];
+    }
+    return [];
+  });
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [showAddSheet, setShowAddSheet] = useState(false);
@@ -862,7 +1146,7 @@ export default function Index() {
   const [showInstrument, setShowInstrument] = useState<string | null>(null);
   const [playingTrackId, setPlayingTrackId] = useState<number | null>(null);
   const audioRefs = useRef<Record<number, HTMLAudioElement>>({});
-  const counterRef = useRef(0);
+  const counterRef = useRef(1); // начинаем с 1, т.к. дорожка по умолчанию имеет id=1
   const playheadRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -885,6 +1169,15 @@ export default function Index() {
       setTracks(prev => prev.map(t => t.id === renamingId ? { ...t, name: renameValue.trim() } : t));
     }
     setRenamingId(null);
+  };
+
+  // FX params per track
+  const [trackFxActive, setTrackFxActive] = useState<Record<number, string[]>>({});
+  const [trackFxParams, setTrackFxParams] = useState<Record<number, FxParams>>({});
+
+  const handleFxChange = (trackId: number, active: string[], params: FxParams) => {
+    setTrackFxActive(prev => ({ ...prev, [trackId]: active }));
+    setTrackFxParams(prev => ({ ...prev, [trackId]: params }));
   };
 
   // Volume
@@ -972,22 +1265,122 @@ export default function Index() {
     }
   };
 
-  /* ─ play/pause track ─ */
-  const togglePlayTrack = (track: Track) => {
+  /* ─ play/pause track (with FX chain) ─ */
+  const [trackPlayOffset, setTrackPlayOffset] = useState<Record<number, number>>({});
+  const playAnimRef = useRef<Record<number, number>>({});
+  const fxCtxRef = useRef<Record<number, AudioContext>>({});
+  const fxSourceRef = useRef<Record<number, AudioBufferSourceNode>>({});
+
+  const stopTrack = (id: number) => {
+    try { fxSourceRef.current[id]?.stop(); } catch { /* already stopped */ }
+    fxCtxRef.current[id]?.close();
+    delete fxSourceRef.current[id];
+    delete fxCtxRef.current[id];
+    if (playAnimRef.current[id]) cancelAnimationFrame(playAnimRef.current[id]);
+    audioRefs.current[id]?.pause();
+  };
+
+  const togglePlayTrack = async (track: Track) => {
     if (!track.url) return;
+
     if (playingTrackId === track.id) {
-      audioRefs.current[track.id]?.pause();
+      stopTrack(track.id);
       setPlayingTrackId(null);
-    } else {
-      Object.values(audioRefs.current).forEach(a => a.pause());
+      return;
+    }
+
+    // Stop all others
+    Object.keys(fxCtxRef.current).forEach(k => stopTrack(+k));
+    Object.values(audioRefs.current).forEach(a => a.pause());
+    Object.keys(playAnimRef.current).forEach(k => cancelAnimationFrame(playAnimRef.current[+k]));
+
+    const active = trackFxActive[track.id] || [];
+    const params = trackFxParams[track.id] || DEFAULT_FX;
+
+    if (active.length === 0) {
+      // Simple playback without FX
       if (!audioRefs.current[track.id]) {
         const audio = new Audio(track.url);
-        audio.onended = () => setPlayingTrackId(null);
+        audio.onended = () => { setPlayingTrackId(null); setTrackPlayOffset(p => ({ ...p, [track.id]: 0 })); };
         audioRefs.current[track.id] = audio;
       }
-      audioRefs.current[track.id].play();
-      setPlayingTrackId(track.id);
+      const audio = audioRefs.current[track.id];
+      audio.currentTime = 0;
+      audio.volume = (track.volume || 80) / 100;
+      audio.play();
+    } else {
+      // Playback with FX chain via Web Audio API
+      try {
+        const ctx = new AudioContext();
+        if (ctx.state === "suspended") await ctx.resume();
+        fxCtxRef.current[track.id] = ctx;
+
+        const resp = await fetch(track.url);
+        const arrBuf = await resp.arrayBuffer();
+        const audioBuf = await ctx.decodeAudioData(arrBuf);
+
+        const chain = buildFxChain(ctx, active, params);
+        const gainOut = ctx.createGain();
+        gainOut.gain.value = (track.volume || 80) / 100;
+        chain.output.connect(gainOut);
+        gainOut.connect(ctx.destination);
+
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(chain.input);
+        fxSourceRef.current[track.id] = src;
+
+        src.onended = () => {
+          ctx.close();
+          delete fxCtxRef.current[track.id];
+          delete fxSourceRef.current[track.id];
+          setPlayingTrackId(null);
+          setTrackPlayOffset(p => ({ ...p, [track.id]: 0 }));
+          if (chain.nodes.chorusOsc) try { chain.nodes.chorusOsc.stop(); } catch { /* ok */ }
+        };
+        src.start();
+      } catch {
+        // Fallback to simple
+        if (!audioRefs.current[track.id]) {
+          const audio = new Audio(track.url);
+          audio.onended = () => { setPlayingTrackId(null); };
+          audioRefs.current[track.id] = audio;
+        }
+        audioRefs.current[track.id].currentTime = 0;
+        audioRefs.current[track.id].play();
+      }
     }
+
+    setPlayingTrackId(track.id);
+
+    // Waveform playhead animation
+    const startTime = performance.now();
+    const getDuration = () => {
+      if (audioRefs.current[track.id]) return audioRefs.current[track.id].duration || 10;
+      if (fxCtxRef.current[track.id]) return fxCtxRef.current[track.id].currentTime + 10;
+      return 10;
+    };
+
+    let estimatedDuration = 10;
+    try {
+      const resp = await fetch(track.url, { method: "HEAD" });
+      if (!resp.ok) throw new Error("head failed");
+    } catch { /* ok */ }
+
+    // Estimate from waveform length * typical sample density
+    estimatedDuration = track.duration
+      ? (() => { const parts = (track.duration || "0:00").split(":"); return (parseInt(parts[0]) * 60 + parseInt(parts[1])) || 10; })()
+      : 10;
+
+    const animate = (now: number) => {
+      const elapsed = (now - startTime) / 1000;
+      const progress = Math.min(1, elapsed / estimatedDuration);
+      setTrackPlayOffset(p => ({ ...p, [track.id]: progress }));
+      if (progress < 1) {
+        playAnimRef.current[track.id] = requestAnimationFrame(animate);
+      }
+    };
+    playAnimRef.current[track.id] = requestAnimationFrame(animate);
   };
 
   /* ─ import file ─ */
@@ -1083,21 +1476,36 @@ export default function Index() {
           </span>
         </div>
 
-        <button
-          className="w-9 h-9 flex items-center justify-center rounded-full relative transition-all"
-          style={{ background: "#0d1e2c", border: savedTracks.length > 0 ? "1px solid rgba(0,194,255,0.3)" : "none" }}
-          onClick={() => setShowCabinet(true)}
-          onMouseEnter={e => e.currentTarget.style.background = "#132030"}
-          onMouseLeave={e => e.currentTarget.style.background = "#0d1e2c"}
-        >
-          <Icon name="User" size={18} style={{ color: "#00c2ff" }} />
-          {savedTracks.length > 0 && (
-            <div className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center font-mono text-[9px] font-bold"
-              style={{ background: "#ef4444", color: "#fff" }}>
-              {savedTracks.length > 9 ? "9+" : savedTracks.length}
-            </div>
+        <div className="flex items-center gap-2">
+          {/* Save button — active track with audio */}
+          {tracks.find(t => t.id === activeTrackId)?.hasAudio && (
+            <button
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full font-bold text-xs transition-all"
+              style={{ background: "rgba(0,230,118,0.15)", color: "#00e676", border: "1px solid rgba(0,230,118,0.4)" }}
+              onClick={() => { const t = tracks.find(tr => tr.id === activeTrackId); if (t) saveTrackToCabinet(t); }}
+              onMouseEnter={e => e.currentTarget.style.boxShadow = "0 0 12px rgba(0,230,118,0.3)"}
+              onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}
+            >
+              <Icon name="Save" size={13} />
+              Сохранить
+            </button>
           )}
-        </button>
+          <button
+            className="w-9 h-9 flex items-center justify-center rounded-full relative transition-all"
+            style={{ background: "#0d1e2c", border: savedTracks.length > 0 ? "1px solid rgba(0,194,255,0.3)" : "none" }}
+            onClick={() => setShowCabinet(true)}
+            onMouseEnter={e => e.currentTarget.style.background = "#132030"}
+            onMouseLeave={e => e.currentTarget.style.background = "#0d1e2c"}
+          >
+            <Icon name="User" size={18} style={{ color: "#00c2ff" }} />
+            {savedTracks.length > 0 && (
+              <div className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center font-mono text-[9px] font-bold"
+                style={{ background: "#ef4444", color: "#fff" }}>
+                {savedTracks.length > 9 ? "9+" : savedTracks.length}
+              </div>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* ── Timeline ruler ── */}
@@ -1221,14 +1629,35 @@ export default function Index() {
                     </div>
                   ) : track.hasAudio && track.waveform ? (
                     <div
-                      className="flex items-end gap-[2px] w-full rounded-xl overflow-hidden cursor-pointer"
-                      style={{ height: 42, background: track.color + "15", padding: "4px 6px" }}
+                      className="relative flex items-end gap-[2px] w-full rounded-xl overflow-hidden cursor-pointer"
+                      style={{ height: 44, background: track.color + "18", padding: "4px 6px" }}
                       onClick={e => { e.stopPropagation(); togglePlayTrack(track); }}
                     >
-                      {track.waveform.map((v, i) => (
-                        <div key={i} className="flex-1 rounded-sm"
-                          style={{ height: `${v}%`, background: isPlaying ? track.color : track.color + "88", transition: "background 0.3s", boxShadow: isPlaying && v > 50 ? `0 0 3px ${track.color}` : "none" }} />
-                      ))}
+                      {track.waveform.map((v, i) => {
+                        const progress = trackPlayOffset[track.id] || 0;
+                        const barProgress = i / track.waveform!.length;
+                        const passed = isPlaying && barProgress <= progress;
+                        return (
+                          <div key={i} className="flex-1 rounded-sm"
+                            style={{
+                              height: `${v}%`,
+                              background: passed ? track.color : track.color + "44",
+                              transition: "background 0.05s",
+                              boxShadow: passed && v > 50 ? `0 0 4px ${track.color}88` : "none",
+                            }} />
+                        );
+                      })}
+                      {/* Playhead line */}
+                      {isPlaying && (
+                        <div className="absolute top-0 bottom-0 w-0.5 pointer-events-none"
+                          style={{
+                            left: `${(trackPlayOffset[track.id] || 0) * 100}%`,
+                            background: "#fff",
+                            opacity: 0.9,
+                            boxShadow: `0 0 6px ${track.color}`,
+                            transition: "left 0.1s linear",
+                          }} />
+                      )}
                     </div>
                   ) : (
                     <div className="w-full flex items-center justify-center" style={{ height: 42 }}>
@@ -1371,7 +1800,17 @@ export default function Index() {
 
       {/* ── Sheets / Modals ── */}
       {showAddSheet && <AddTrackSheet onClose={() => setShowAddSheet(false)} onAdd={addTrack} onImport={() => fileInputRef.current?.click()} />}
-      {showFx !== null && <FxSheet trackName={tracks.find(t => t.id === showFx)?.name || "Дорожка"} onClose={() => setShowFx(null)} />}
+      {showFx !== null && (() => {
+        const fxTrack = tracks.find(t => t.id === showFx);
+        return (
+          <FxSheet
+            trackName={fxTrack?.name || "Дорожка"}
+            trackUrl={fxTrack?.url}
+            onClose={() => setShowFx(null)}
+            onFxChange={(active, params) => showFx && handleFxChange(showFx, active, params)}
+          />
+        );
+      })()}
       {showAutoPitch && <AutoPitchModal onClose={() => setShowAutoPitch(false)} />}
       {(showInstrument === "guitar") && <GuitarPanel type="guitar" onClose={() => setShowInstrument(null)} />}
       {(showInstrument === "bass") && <GuitarPanel type="bass" onClose={() => setShowInstrument(null)} />}
