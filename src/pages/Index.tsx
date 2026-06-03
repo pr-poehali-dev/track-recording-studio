@@ -9,6 +9,7 @@ interface Track {
   name: string;
   color: string;
   icon: string;
+  type: string;
   hasAudio: boolean;
   url?: string;
   duration?: string;
@@ -41,6 +42,391 @@ const TrackWave = ({ waveform, color, playing }: { waveform: number[]; color: st
   </div>
 );
 
+/* ─── Web Audio helpers ──────────────────────────────────── */
+let sharedAudioCtx: AudioContext | null = null;
+const getAudioCtx = () => {
+  if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
+    sharedAudioCtx = new AudioContext();
+  }
+  if (sharedAudioCtx.state === "suspended") sharedAudioCtx.resume();
+  return sharedAudioCtx;
+};
+
+const playTone = (freq: number, type: OscillatorType = "sawtooth", duration = 0.5, vol = 0.4) => {
+  const ctx = getAudioCtx();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(vol, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + duration);
+};
+
+const NOTES: Record<string, number> = {
+  C3: 130.81, D3: 146.83, E3: 164.81, F3: 174.61, G3: 196, A3: 220, B3: 246.94,
+  C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23, G4: 392, A4: 440, B4: 493.88,
+  C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46, G5: 783.99, A5: 880,
+  "C#3": 138.59, "D#3": 155.56, "F#3": 185, "G#3": 207.65, "A#3": 233.08,
+  "C#4": 277.18, "D#4": 311.13, "F#4": 369.99, "G#4": 415.3, "A#4": 466.16,
+  "C#5": 554.37, "D#5": 622.25, "F#5": 739.99, "G#5": 830.61, "A#5": 932.33,
+};
+
+/* ─── Guitar/Bass instrument panel ──────────────────────── */
+const STRING_PRESETS: Record<string, { strings: string[]; type: OscillatorType; label: string }> = {
+  guitar: { strings: ["E2", "A2", "D3", "G3", "B3", "E4"], type: "sawtooth", label: "Гитара" },
+  bass: { strings: ["E1", "A1", "D2", "G2"], type: "sawtooth", label: "Бас" },
+};
+
+// E1, A1, D2 not in NOTES map — add them:
+const EXTRA: Record<string, number> = { E1: 41.2, A1: 55, D2: 73.42, E2: 82.41, A2: 110, B3: 246.94 };
+const allNotes = { ...NOTES, ...EXTRA };
+
+const GuitarPanel = ({ type, onClose }: { type: "guitar" | "bass"; onClose: () => void }) => {
+  const preset = STRING_PRESETS[type];
+  const [pressed, setPressed] = useState<string | null>(null);
+  const frets = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+  const fretMultiplier = (fret: number) => Math.pow(2, fret / 12);
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.85)" }} onClick={onClose}>
+      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0a1520", maxHeight: "70vh" }} onClick={e => e.stopPropagation()}>
+        <div className="flex justify-center pt-3 pb-1"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+        <div className="flex items-center justify-between px-5 py-3">
+          <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>{preset.label}</span>
+          <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
+        </div>
+
+        {/* Fretboard */}
+        <div className="px-3 pb-6 overflow-x-auto">
+          <div className="relative" style={{ minWidth: 420 }}>
+            {/* Fret numbers */}
+            <div className="flex mb-1 ml-12">
+              {frets.map(f => (
+                <div key={f} className="flex-1 text-center font-mono text-[10px]" style={{ color: "#2a4050" }}>{f}</div>
+              ))}
+            </div>
+            {preset.strings.map((str, si) => {
+              const baseFreq = allNotes[str] || 110;
+              return (
+                <div key={str} className="flex items-center mb-1">
+                  <div className="w-10 text-xs font-mono text-right pr-2 flex-shrink-0" style={{ color: "#06b6d4" }}>{str}</div>
+                  <div className="flex flex-1 relative" style={{ height: 32 }}>
+                    {/* String line */}
+                    <div className="absolute top-1/2 left-0 right-0 -translate-y-1/2" style={{ height: 2 - si * 0.2, background: `rgba(0,194,255,${0.3 + si * 0.05})`, borderRadius: 1 }} />
+                    {frets.map(f => {
+                      const key = `${si}-${f}`;
+                      const freq = baseFreq * fretMultiplier(f);
+                      return (
+                        <div key={f} className="flex-1 flex items-center justify-center relative z-10"
+                          onMouseDown={() => { setPressed(key); playTone(freq, preset.type, 1.2, 0.35); }}
+                          onMouseUp={() => setPressed(null)}
+                          onTouchStart={() => { setPressed(key); playTone(freq, preset.type, 1.2, 0.35); }}
+                          onTouchEnd={() => setPressed(null)}
+                        >
+                          <div className={`w-5 h-5 rounded-full transition-all cursor-pointer`}
+                            style={{
+                              background: pressed === key ? "#00c2ff" : f === 0 ? "#1e3040" : "#0d1e2c",
+                              border: `1px solid ${pressed === key ? "#00c2ff" : "#1e3040"}`,
+                              boxShadow: pressed === key ? "0 0 8px #00c2ff" : "none",
+                              transform: pressed === key ? "scale(1.3)" : "scale(1)",
+                            }} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-center text-xs mt-3" style={{ color: "#2a4050" }}>Нажимай на лады — каждая строка это струна</p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ─── Piano / VST panel ──────────────────────────────────── */
+const PIANO_KEYS = [
+  { note: "C4", label: "C", black: false }, { note: "C#4", label: "", black: true },
+  { note: "D4", label: "D", black: false }, { note: "D#4", label: "", black: true },
+  { note: "E4", label: "E", black: false },
+  { note: "F4", label: "F", black: false }, { note: "F#4", label: "", black: true },
+  { note: "G4", label: "G", black: false }, { note: "G#4", label: "", black: true },
+  { note: "A4", label: "A", black: false }, { note: "A#4", label: "", black: true },
+  { note: "B4", label: "B", black: false },
+  { note: "C5", label: "C", black: false }, { note: "C#5", label: "", black: true },
+  { note: "D5", label: "D", black: false }, { note: "D#5", label: "", black: true },
+  { note: "E5", label: "E", black: false },
+];
+
+const PianoPanel = ({ onClose, octave = 0 }: { onClose: () => void; octave?: number }) => {
+  const [active, setActive] = useState<string | null>(null);
+  const [oct, setOct] = useState(octave);
+  const whites = PIANO_KEYS.filter(k => !k.black);
+  const blacks = PIANO_KEYS.filter(k => k.black);
+
+  const play = (note: string) => {
+    const base = NOTES[note] || 440;
+    const freq = base * Math.pow(2, oct);
+    setActive(note);
+    playTone(freq, "triangle", 0.8, 0.45);
+    setTimeout(() => setActive(null), 200);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.85)" }} onClick={onClose}>
+      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0a1520" }} onClick={e => e.stopPropagation()}>
+        <div className="flex justify-center pt-3 pb-1"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+        <div className="flex items-center justify-between px-5 py-3">
+          <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>Клавиши</span>
+          <div className="flex items-center gap-3">
+            <button onClick={() => setOct(o => o - 1)} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: "#0d1e2c", color: "#7ab" }}>−</button>
+            <span className="font-mono text-sm" style={{ color: "#00c2ff" }}>Oct {oct >= 0 ? "+" : ""}{oct}</span>
+            <button onClick={() => setOct(o => o + 1)} className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: "#0d1e2c", color: "#7ab" }}>+</button>
+            <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
+          </div>
+        </div>
+        <div className="relative overflow-x-auto pb-6 px-3">
+          <div className="relative flex" style={{ height: 120, minWidth: 340 }}>
+            {/* White keys */}
+            {whites.map((k, i) => (
+              <div key={k.note}
+                onMouseDown={() => play(k.note)}
+                onTouchStart={e => { e.preventDefault(); play(k.note); }}
+                className="flex-1 flex flex-col justify-end items-center pb-2 cursor-pointer rounded-b-lg transition-all"
+                style={{
+                  background: active === k.note ? "#00c2ff33" : "#e2f4ff",
+                  border: "1px solid #7ab",
+                  marginRight: 2,
+                  boxShadow: active === k.note ? "0 0 12px #00c2ff" : "none",
+                }}>
+                <span className="text-[10px] font-mono" style={{ color: "#0a1520" }}>{k.label}</span>
+              </div>
+            ))}
+            {/* Black keys overlay */}
+            <div className="absolute top-0 left-0 w-full" style={{ height: 72, pointerEvents: "none" }}>
+              {(() => {
+                // Position black keys between whites
+                const positions = [1, 2, 4, 5, 6, 8, 9, 11, 12, 13];
+                return blacks.map((k, i) => (
+                  <div key={k.note}
+                    style={{
+                      position: "absolute",
+                      left: `calc(${(positions[i] / whites.length) * 100}% - 10px)`,
+                      width: 20,
+                      height: "100%",
+                      background: active === k.note ? "#00c2ff" : "#0a1520",
+                      borderRadius: "0 0 6px 6px",
+                      zIndex: 2,
+                      pointerEvents: "all",
+                      cursor: "pointer",
+                      border: "1px solid #1e3040",
+                      boxShadow: active === k.note ? "0 0 8px #00c2ff" : "none",
+                    }}
+                    onMouseDown={() => play(k.note)}
+                    onTouchStart={e => { e.preventDefault(); play(k.note); }}
+                  />
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ─── Drum machine panel ─────────────────────────────────── */
+const DRUM_PADS = [
+  { label: "Kick",  color: "#ef4444", freq: 60,  type: "sine" as OscillatorType,  dur: 0.4 },
+  { label: "Snare", color: "#f97316", freq: 200, type: "sawtooth" as OscillatorType, dur: 0.15 },
+  { label: "HiHat", color: "#eab308", freq: 8000,type: "square" as OscillatorType, dur: 0.05 },
+  { label: "Open",  color: "#84cc16", freq: 6000,type: "square" as OscillatorType, dur: 0.25 },
+  { label: "Tom 1", color: "#06b6d4", freq: 120, type: "sine" as OscillatorType,  dur: 0.3 },
+  { label: "Tom 2", color: "#3b82f6", freq: 90,  type: "sine" as OscillatorType,  dur: 0.35 },
+  { label: "Clap",  color: "#8b5cf6", freq: 1200,type: "sawtooth" as OscillatorType, dur: 0.1 },
+  { label: "Rim",   color: "#ec4899", freq: 900, type: "square" as OscillatorType, dur: 0.08 },
+];
+
+const DrumPanel = ({ onClose }: { onClose: () => void }) => {
+  const [active, setActive] = useState<number | null>(null);
+  const [seq, setSeq] = useState<boolean[][]>(DRUM_PADS.map(() => new Array(16).fill(false)));
+  const [seqPlaying, setSeqPlaying] = useState(false);
+  const [step, setStep] = useState(0);
+  const seqRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const hitPad = (i: number) => {
+    const p = DRUM_PADS[i];
+    setActive(i);
+    playTone(p.freq, p.type, p.dur, 0.5);
+    setTimeout(() => setActive(null), 100);
+  };
+
+  const toggleSeq = (pad: number, beat: number) => {
+    setSeq(s => { const n = s.map(r => [...r]); n[pad][beat] = !n[pad][beat]; return n; });
+  };
+
+  useEffect(() => {
+    if (seqPlaying) {
+      seqRef.current = setInterval(() => {
+        setStep(s => {
+          const next = (s + 1) % 16;
+          seq.forEach((row, pi) => { if (row[next]) hitPad(pi); });
+          return next;
+        });
+      }, 125);
+    } else {
+      if (seqRef.current) clearInterval(seqRef.current);
+    }
+    return () => { if (seqRef.current) clearInterval(seqRef.current); };
+  }, [seqPlaying, seq]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.9)" }} onClick={onClose}>
+      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0a1520", maxHeight: "90vh" }} onClick={e => e.stopPropagation()}>
+        <div className="flex justify-center pt-3 pb-1"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+        <div className="flex items-center justify-between px-5 py-3">
+          <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>Драм-машина</span>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setSeqPlaying(v => !v)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full font-bold text-xs transition-all"
+              style={{ background: seqPlaying ? "#ef4444" : "#0d1e2c", color: seqPlaying ? "#fff" : "#7ab", border: `1px solid ${seqPlaying ? "#ef4444" : "#1e3040"}` }}>
+              <div className={`w-2 h-2 rounded-full ${seqPlaying ? "recording-dot" : ""}`} style={{ background: seqPlaying ? "#fff" : "#4a6070" }} />
+              {seqPlaying ? "Stop" : "Play"}
+            </button>
+            <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
+          </div>
+        </div>
+
+        {/* Pads */}
+        <div className="grid grid-cols-4 gap-2 px-4 pb-3">
+          {DRUM_PADS.map((p, i) => (
+            <button key={i} onMouseDown={() => hitPad(i)} onTouchStart={e => { e.preventDefault(); hitPad(i); }}
+              className="h-16 rounded-2xl flex items-center justify-center font-bold text-sm transition-all cursor-pointer"
+              style={{
+                background: active === i ? p.color : p.color + "22",
+                border: `2px solid ${p.color}`,
+                color: active === i ? "#fff" : p.color,
+                transform: active === i ? "scale(0.94)" : "scale(1)",
+                boxShadow: active === i ? `0 0 16px ${p.color}88` : "none",
+              }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Sequencer */}
+        <div className="px-4 pb-6 overflow-x-auto">
+          <p className="text-xs mb-2" style={{ color: "#2a4050" }}>Секвенсор — включи шаги:</p>
+          <div style={{ minWidth: 340 }}>
+            {DRUM_PADS.map((p, pi) => (
+              <div key={pi} className="flex items-center gap-1 mb-1">
+                <span className="text-[10px] font-mono w-10 flex-shrink-0" style={{ color: p.color }}>{p.label}</span>
+                {seq[pi].map((on, bi) => (
+                  <button key={bi} onClick={() => toggleSeq(pi, bi)}
+                    className="flex-1 rounded transition-all"
+                    style={{
+                      height: 16,
+                      background: on ? p.color : "#0d1e2c",
+                      border: `1px solid ${step === bi && seqPlaying ? "#00c2ff" : on ? p.color : "#1e3040"}`,
+                      boxShadow: step === bi && seqPlaying ? "0 0 6px #00c2ff" : "none",
+                    }} />
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ─── Sampler / Looper panel ─────────────────────────────── */
+const SamplerPanel = ({ onClose, onImport }: { onClose: () => void; onImport: () => void }) => {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [samples, setSamples] = useState<{ name: string; url: string; color: string }[]>([]);
+  const [active, setActive] = useState<number | null>(null);
+  const colors = ["#ef4444", "#f97316", "#eab308", "#10b981", "#06b6d4", "#8b5cf6", "#ec4899", "#f59e0b"];
+
+  const loadFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    Array.from(e.target.files || []).forEach((file, i) => {
+      const url = URL.createObjectURL(file);
+      setSamples(s => [...s, { name: file.name.replace(/\.[^.]+$/, "").slice(0, 12), url, color: colors[s.length % colors.length] }]);
+    });
+    e.target.value = "";
+  };
+
+  const playSample = (i: number, url: string) => {
+    const audio = new Audio(url);
+    setActive(i);
+    audio.play();
+    audio.onended = () => setActive(null);
+    setTimeout(() => setActive(null), 800);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.85)" }} onClick={onClose}>
+      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0a1520", maxHeight: "75vh" }} onClick={e => e.stopPropagation()}>
+        <div className="flex justify-center pt-3 pb-1"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+        <div className="flex items-center justify-between px-5 py-3">
+          <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>Сэмплер</span>
+          <div className="flex items-center gap-2">
+            <button onClick={() => fileRef.current?.click()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold"
+              style={{ background: "#00c2ff22", color: "#00c2ff", border: "1px solid #00c2ff55" }}>
+              <Icon name="Plus" size={12} /> Загрузить
+            </button>
+            <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
+          </div>
+        </div>
+        <input ref={fileRef} type="file" accept="audio/*" multiple className="hidden" onChange={loadFile} />
+
+        {samples.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-12 gap-3">
+            <Icon name="Music" size={36} style={{ color: "#1e3040" }} />
+            <p className="text-sm" style={{ color: "#2a4050" }}>Загрузи аудио-файлы для паддов</p>
+            <button onClick={() => fileRef.current?.click()}
+              className="px-5 py-2.5 rounded-full font-semibold text-sm"
+              style={{ background: "#00c2ff", color: "#000" }}>
+              Выбрать файлы
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-4 gap-2 px-4 pb-6">
+            {samples.map((s, i) => (
+              <button key={i}
+                onMouseDown={() => playSample(i, s.url)}
+                onTouchStart={e => { e.preventDefault(); playSample(i, s.url); }}
+                className="h-16 rounded-2xl flex items-center justify-center font-bold text-xs transition-all p-1 text-center cursor-pointer"
+                style={{
+                  background: active === i ? s.color : s.color + "22",
+                  border: `2px solid ${s.color}`,
+                  color: active === i ? "#fff" : s.color,
+                  transform: active === i ? "scale(0.94)" : "scale(1)",
+                  boxShadow: active === i ? `0 0 16px ${s.color}88` : "none",
+                  lineHeight: 1.2,
+                }}>
+                {s.name}
+              </button>
+            ))}
+            {samples.length < 16 && (
+              <button onClick={() => fileRef.current?.click()}
+                className="h-16 rounded-2xl flex items-center justify-center transition-all"
+                style={{ border: "2px dashed #1e3040", color: "#2a4050" }}>
+                <Icon name="Plus" size={20} />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 /* ─── Add Track Sheet ────────────────────────────────────── */
 const trackTypes = [
   { icon: "Mic", label: "Голос/Аудио", sub: "Запись с AutoPitch и эффектами", color: "#ef4444", type: "voice" },
@@ -52,7 +438,11 @@ const trackTypes = [
   { icon: "Grid", label: "Драм-машина", sub: "Создавайте биты за считанные секунды", color: "#f97316", type: "drums", badge: "MIDI" },
 ];
 
-const AddTrackSheet = ({ onClose, onAdd }: { onClose: () => void; onAdd: (type: string, name: string, color: string, icon: string) => void }) => (
+const AddTrackSheet = ({ onClose, onAdd, onImport }: {
+  onClose: () => void;
+  onAdd: (type: string, name: string, color: string, icon: string) => void;
+  onImport: () => void;
+}) => (
   <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.7)" }} onClick={onClose}>
     <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0f1923", maxHeight: "85vh" }} onClick={e => e.stopPropagation()}>
       <div className="flex justify-center pt-3 pb-2">
@@ -62,11 +452,8 @@ const AddTrackSheet = ({ onClose, onAdd }: { onClose: () => void; onAdd: (type: 
         <span className="text-xl font-bold" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif", letterSpacing: "0.03em" }}>
           Добавить дорожку
         </span>
-        <button className="px-4 py-1.5 rounded-full font-bold text-sm" style={{ background: "#00c2ff", color: "#000" }}>
-          Pro
-        </button>
       </div>
-      <div className="overflow-y-auto px-4 pb-6 space-y-1" style={{ maxHeight: "55vh" }}>
+      <div className="overflow-y-auto px-4 pb-4 space-y-1" style={{ maxHeight: "50vh" }}>
         {trackTypes.map(t => (
           <button
             key={t.type}
@@ -92,23 +479,35 @@ const AddTrackSheet = ({ onClose, onAdd }: { onClose: () => void; onAdd: (type: 
         ))}
       </div>
       <div className="grid grid-cols-2 gap-3 px-4 pb-6 pt-2" style={{ borderTop: "1px solid #1a2530" }}>
-        <ImportButton icon="FileMusic" label="Импортировать" sub="Аудио, видео или файл" />
-        <ImportButton icon="Music" label="Звонки & семплы" sub="Из телефона и библиотеки" />
+        <button
+          className="flex items-center gap-3 p-3 rounded-2xl transition-all"
+          style={{ background: "#141e28" }}
+          onMouseEnter={e => e.currentTarget.style.background = "#1a2a38"}
+          onMouseLeave={e => e.currentTarget.style.background = "#141e28"}
+          onClick={() => { onImport(); onClose(); }}
+        >
+          <Icon name="FileMusic" size={20} style={{ color: "#00c2ff" }} />
+          <div className="text-left">
+            <div className="text-sm font-semibold" style={{ color: "#e2f4ff" }}>Импортировать</div>
+            <div className="text-xs" style={{ color: "#4a6070" }}>Аудио, видео или файл</div>
+          </div>
+        </button>
+        <button
+          className="flex items-center gap-3 p-3 rounded-2xl transition-all"
+          style={{ background: "#141e28" }}
+          onMouseEnter={e => e.currentTarget.style.background = "#1a2a38"}
+          onMouseLeave={e => e.currentTarget.style.background = "#141e28"}
+          onClick={() => { onImport(); onClose(); }}
+        >
+          <Icon name="Music" size={20} style={{ color: "#8b5cf6" }} />
+          <div className="text-left">
+            <div className="text-sm font-semibold" style={{ color: "#e2f4ff" }}>Звуки & семплы</div>
+            <div className="text-xs" style={{ color: "#4a6070" }}>mp3, wav, ogg, m4a</div>
+          </div>
+        </button>
       </div>
     </div>
   </div>
-);
-
-const ImportButton = ({ icon, label, sub }: { icon: string; label: string; sub: string }) => (
-  <button className="flex items-center gap-3 p-3 rounded-2xl transition-all" style={{ background: "#141e28" }}
-    onMouseEnter={e => e.currentTarget.style.background = "#1a2a38"}
-    onMouseLeave={e => e.currentTarget.style.background = "#141e28"}>
-    <Icon name={icon} size={20} style={{ color: "#00c2ff" }} />
-    <div className="text-left">
-      <div className="text-sm font-semibold" style={{ color: "#e2f4ff" }}>{label}</div>
-      <div className="text-xs" style={{ color: "#4a6070" }}>{sub}</div>
-    </div>
-  </button>
 );
 
 /* ─── FX Sheet ───────────────────────────────────────────── */
@@ -309,6 +708,7 @@ export default function Index() {
   const [showFx, setShowFx] = useState<number | null>(null);
   const [showAutoPitch, setShowAutoPitch] = useState(false);
   const [activeTrackId, setActiveTrackId] = useState<number | null>(null);
+  const [showInstrument, setShowInstrument] = useState<string | null>(null);
   const [playingTrackId, setPlayingTrackId] = useState<number | null>(null);
   const audioRefs = useRef<Record<number, HTMLAudioElement>>({});
   const counterRef = useRef(0);
@@ -387,6 +787,7 @@ export default function Index() {
       name: type === "voice" ? `Голос/Аудио ${counterRef.current}` : name,
       color,
       icon,
+      type,
       hasAudio: false,
       fx: [],
       muted: false,
@@ -396,6 +797,10 @@ export default function Index() {
     };
     setTracks(prev => [...prev, newTrack]);
     setActiveTrackId(newTrack.id);
+    // Открываем интерфейс инструмента сразу
+    if (["guitar", "bass", "vst", "drums", "sampler", "looper"].includes(type)) {
+      setShowInstrument(type);
+    }
   };
 
   /* ─ start recording on active track ─ */
@@ -404,7 +809,7 @@ export default function Index() {
       if (!activeTrackId) {
         counterRef.current += 1;
         const id = counterRef.current;
-        setTracks(prev => [...prev, { id, name: `Голос/Аудио ${id}`, color: "#ef4444", icon: "Mic", hasAudio: false, fx: [], muted: false, solo: false, volume: 80, waveform: Array.from({ length: 60 }, () => 0) }]);
+        setTracks(prev => [...prev, { id, name: `Голос/Аудио ${id}`, color: "#ef4444", icon: "Mic", type: "voice", hasAudio: false, fx: [], muted: false, solo: false, volume: 80, waveform: Array.from({ length: 60 }, () => 0) }]);
         setActiveTrackId(id);
       }
       await recorder.start();
@@ -444,7 +849,7 @@ export default function Index() {
     const waveform = Array.from({ length: 60 }, () => Math.random() * 80 + 15);
     counterRef.current += 1;
     const id = counterRef.current;
-    setTracks(prev => [...prev, { id, name: file.name.replace(/\.[^.]+$/, ""), color: "#06b6d4", icon: "FileMusic", hasAudio: true, url, duration: "—", waveform, fx: [], muted: false, solo: false, volume: 80 }]);
+    setTracks(prev => [...prev, { id, name: file.name.replace(/\.[^.]+$/, ""), color: "#06b6d4", icon: "FileMusic", type: "import", hasAudio: true, url, duration: "—", waveform, fx: [], muted: false, solo: false, volume: 80 }]);
     setActiveTrackId(id);
     e.target.value = "";
   };
@@ -561,7 +966,7 @@ export default function Index() {
                       <Icon name="Pencil" size={10} />
                     </button>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <button
                       className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all"
                       style={{ background: "#0d1e2c", color: "#00c2ff", border: "1px solid #1a3040" }}
@@ -569,6 +974,16 @@ export default function Index() {
                     >
                       +Fx
                     </button>
+                    {["guitar","bass","vst","drums","sampler","looper"].includes(track.type) && (
+                      <button
+                        className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all"
+                        style={{ background: "#0d1e2c", color: track.color, border: `1px solid ${track.color}55` }}
+                        onClick={e => { e.stopPropagation(); setShowInstrument(track.type); }}
+                      >
+                        <Icon name="Piano" size={10} />
+                        Играть
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -731,9 +1146,14 @@ export default function Index() {
       )}
 
       {/* ── Sheets / Modals ── */}
-      {showAddSheet && <AddTrackSheet onClose={() => setShowAddSheet(false)} onAdd={addTrack} />}
+      {showAddSheet && <AddTrackSheet onClose={() => setShowAddSheet(false)} onAdd={addTrack} onImport={() => fileInputRef.current?.click()} />}
       {showFx !== null && <FxSheet trackName={tracks.find(t => t.id === showFx)?.name || "Дорожка"} onClose={() => setShowFx(null)} />}
       {showAutoPitch && <AutoPitchModal onClose={() => setShowAutoPitch(false)} />}
+      {(showInstrument === "guitar") && <GuitarPanel type="guitar" onClose={() => setShowInstrument(null)} />}
+      {(showInstrument === "bass") && <GuitarPanel type="bass" onClose={() => setShowInstrument(null)} />}
+      {(showInstrument === "vst" || showInstrument === "looper") && <PianoPanel onClose={() => setShowInstrument(null)} />}
+      {showInstrument === "drums" && <DrumPanel onClose={() => setShowInstrument(null)} />}
+      {showInstrument === "sampler" && <SamplerPanel onClose={() => setShowInstrument(null)} onImport={() => fileInputRef.current?.click()} />}
     </div>
   );
 }
