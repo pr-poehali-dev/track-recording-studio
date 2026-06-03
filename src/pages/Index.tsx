@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 
-const VUMeter = () => {
+const VUMeter = ({ levels }: { levels?: number[] }) => {
   const bars = [1, 2, 3, 4, 5, 6, 7, 8];
   const classes = [
     "vu-bar-1", "vu-bar-2", "vu-bar-3", "vu-bar-4",
@@ -16,11 +16,304 @@ const VUMeter = () => {
       {bars.map((_, i) => (
         <div key={i} className="w-2 rounded-sm" style={{ backgroundColor: colors[i] + "15", position: "relative", height: "100%" }}>
           <div
-            className={`w-full rounded-sm absolute bottom-0 ${classes[i]}`}
-            style={{ backgroundColor: colors[i], boxShadow: `0 0 6px ${colors[i]}80` }}
+            className={`w-full rounded-sm absolute bottom-0 ${levels ? "" : classes[i]}`}
+            style={{
+              backgroundColor: colors[i],
+              boxShadow: `0 0 6px ${colors[i]}80`,
+              height: levels ? `${Math.min(100, levels[i] || 0)}%` : undefined,
+              transition: levels ? "height 0.05s ease-out" : undefined,
+            }}
           />
         </div>
       ))}
+    </div>
+  );
+};
+
+type RecordingState = "idle" | "recording" | "paused" | "done";
+
+interface RecordingEntry {
+  id: number;
+  name: string;
+  url: string;
+  duration: string;
+  size: string;
+}
+
+const RecorderPanel = () => {
+  const [state, setState] = useState<RecordingState>("idle");
+  const [recTime, setRecTime] = useState(0);
+  const [vuLevels, setVuLevels] = useState<number[]>(new Array(8).fill(0));
+  const [recordings, setRecordings] = useState<RecordingEntry[]>([]);
+  const [error, setError] = useState("");
+  const [playingId, setPlayingId] = useState<number | null>(null);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animFrameRef = useRef<number>(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioRefs = useRef<Record<number, HTMLAudioElement>>({});
+  const counterRef = useRef(0);
+
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  };
+
+  const formatBytes = (b: number) => b < 1024 * 1024 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1024 / 1024).toFixed(1)} MB`;
+
+  const animateVU = useCallback(() => {
+    if (!analyserRef.current) return;
+    const data = new Uint8Array(analyserRef.current.frequencyBinCount);
+    analyserRef.current.getByteFrequencyData(data);
+    const step = Math.floor(data.length / 8);
+    const lvls = Array.from({ length: 8 }, (_, i) => {
+      const slice = data.slice(i * step, (i + 1) * step);
+      const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
+      return (avg / 255) * 100;
+    });
+    setVuLevels(lvls);
+    animFrameRef.current = requestAnimationFrame(animateVU);
+  }, []);
+
+  const startRecording = async () => {
+    setError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const ctx = new AudioContext();
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      src.connect(analyser);
+      analyserRef.current = analyser;
+
+      const mr = new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      chunksRef.current = [];
+
+      mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const url = URL.createObjectURL(blob);
+        counterRef.current += 1;
+        setRecordings(prev => [...prev, {
+          id: counterRef.current,
+          name: `Запись ${counterRef.current}`,
+          url,
+          duration: formatTime(recTimeRef.current),
+          size: formatBytes(blob.size),
+        }]);
+        setVuLevels(new Array(8).fill(0));
+        cancelAnimationFrame(animFrameRef.current);
+      };
+
+      mr.start(100);
+      setState("recording");
+      setRecTime(0);
+      recTimeRef.current = 0;
+      timerRef.current = setInterval(() => {
+        recTimeRef.current += 1;
+        setRecTime(t => t + 1);
+      }, 1000);
+      animateVU();
+    } catch {
+      setError("Нет доступа к микрофону. Разреши доступ в браузере.");
+    }
+  };
+
+  const recTimeRef = useRef(0);
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop();
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    if (timerRef.current) clearInterval(timerRef.current);
+    setState("done");
+    setRecTime(0);
+  };
+
+  const pauseResume = () => {
+    if (state === "recording") {
+      mediaRecorderRef.current?.pause();
+      if (timerRef.current) clearInterval(timerRef.current);
+      cancelAnimationFrame(animFrameRef.current);
+      setVuLevels(new Array(8).fill(0));
+      setState("paused");
+    } else if (state === "paused") {
+      mediaRecorderRef.current?.resume();
+      timerRef.current = setInterval(() => {
+        recTimeRef.current += 1;
+        setRecTime(t => t + 1);
+      }, 1000);
+      animateVU();
+      setState("recording");
+    }
+  };
+
+  const togglePlay = (rec: RecordingEntry) => {
+    if (playingId === rec.id) {
+      audioRefs.current[rec.id]?.pause();
+      setPlayingId(null);
+    } else {
+      Object.values(audioRefs.current).forEach(a => a.pause());
+      if (!audioRefs.current[rec.id]) {
+        const audio = new Audio(rec.url);
+        audio.onended = () => setPlayingId(null);
+        audioRefs.current[rec.id] = audio;
+      }
+      audioRefs.current[rec.id].play();
+      setPlayingId(rec.id);
+    }
+  };
+
+  const deleteRec = (id: number) => {
+    audioRefs.current[id]?.pause();
+    delete audioRefs.current[id];
+    if (playingId === id) setPlayingId(null);
+    setRecordings(prev => prev.filter(r => r.id !== id));
+  };
+
+  useEffect(() => () => {
+    cancelAnimationFrame(animFrameRef.current);
+    if (timerRef.current) clearInterval(timerRef.current);
+  }, []);
+
+  return (
+    <div className="rounded-2xl overflow-hidden" style={{ background: "var(--daw-surface)", border: "1px solid var(--daw-border)" }}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-3" style={{ background: "var(--daw-surface2)", borderBottom: "1px solid var(--daw-border)" }}>
+        <div className="flex items-center gap-3">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full" style={{ background: "#ff5f57" }} />
+            <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
+            <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
+          </div>
+          <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>trackstudio — session_01.trk</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {state === "recording" && (
+            <div className="flex items-center gap-2">
+              <div className="recording-dot w-2 h-2 rounded-full" style={{ background: "var(--daw-red)" }} />
+              <span className="font-mono text-xs" style={{ color: "var(--daw-red)" }}>REC {formatTime(recTime)}</span>
+            </div>
+          )}
+          {state === "paused" && (
+            <span className="font-mono text-xs" style={{ color: "var(--daw-orange)" }}>ПАУЗА {formatTime(recTime)}</span>
+          )}
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div className="flex items-center gap-3 px-5 py-4" style={{ borderBottom: "1px solid var(--daw-border)" }}>
+        {state === "idle" || state === "done" ? (
+          <button
+            onClick={startRecording}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-all duration-300 font-plex"
+            style={{ background: "var(--daw-red)", color: "#fff", fontSize: "0.85rem" }}
+            onMouseEnter={e => e.currentTarget.style.boxShadow = "0 0 20px rgba(255,23,68,0.4)"}
+            onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}
+          >
+            <div className="w-3 h-3 rounded-full bg-white" />
+            Начать запись
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={stopRecording}
+              className="w-10 h-10 rounded-lg flex items-center justify-center transition-all"
+              style={{ background: "var(--daw-surface2)", border: "1px solid var(--daw-border)" }}
+            >
+              <Icon name="Square" size={14} style={{ color: "var(--daw-muted)" }} />
+            </button>
+            <button
+              onClick={pauseResume}
+              className="w-10 h-10 rounded-xl flex items-center justify-center transition-all"
+              style={{ background: state === "paused" ? "var(--daw-cyan)" : "var(--daw-surface2)", border: `1px solid ${state === "paused" ? "var(--daw-cyan)" : "var(--daw-border)"}` }}
+            >
+              <Icon name={state === "paused" ? "Play" : "Pause"} size={16} style={{ color: state === "paused" ? "var(--daw-bg)" : "var(--daw-muted)" }} />
+            </button>
+          </>
+        )}
+
+        <div className="flex-1 flex items-end gap-[3px] h-10 mx-2">
+          {Array.from({ length: 32 }).map((_, i) => (
+            <div
+              key={i}
+              className="flex-1 rounded-full transition-all"
+              style={{
+                height: state === "recording" ? `${Math.min(100, (vuLevels[i % 8] || 0) * (0.5 + Math.random() * 0.5))}%` : "15%",
+                background: state === "recording"
+                  ? `linear-gradient(180deg, var(--daw-cyan) 0%, rgba(0,229,255,0.3) 100%)`
+                  : "var(--daw-border)",
+                transition: "height 0.05s ease-out",
+              }}
+            />
+          ))}
+        </div>
+
+        <VUMeter levels={state === "recording" ? vuLevels : undefined} />
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="mx-5 mt-4 px-4 py-3 rounded-lg flex items-center gap-2" style={{ background: "rgba(255,23,68,0.1)", border: "1px solid rgba(255,23,68,0.3)" }}>
+          <Icon name="AlertCircle" size={14} style={{ color: "var(--daw-red)" }} />
+          <span className="text-sm" style={{ color: "var(--daw-red)" }}>{error}</span>
+        </div>
+      )}
+
+      {/* Recordings list */}
+      <div className="p-5 space-y-2">
+        {recordings.length === 0 ? (
+          <div className="text-center py-8">
+            <Icon name="Mic" size={28} style={{ color: "var(--daw-border)", margin: "0 auto 8px" }} />
+            <p className="text-sm" style={{ color: "var(--daw-muted)" }}>Нет записей. Нажми «Начать запись»</p>
+          </div>
+        ) : recordings.map(rec => (
+          <div key={rec.id} className="flex items-center gap-3 p-3 rounded-lg transition-all"
+            style={{ background: "var(--daw-surface2)", border: "1px solid var(--daw-border)" }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = "var(--daw-border)"}
+          >
+            <button
+              onClick={() => togglePlay(rec)}
+              className="w-9 h-9 rounded-lg flex-shrink-0 flex items-center justify-center transition-all"
+              style={{ background: playingId === rec.id ? "var(--daw-cyan)" : "var(--daw-bg)", border: `1px solid ${playingId === rec.id ? "var(--daw-cyan)" : "var(--daw-border)"}` }}
+            >
+              <Icon name={playingId === rec.id ? "Pause" : "Play"} size={14} style={{ color: playingId === rec.id ? "var(--daw-bg)" : "var(--daw-muted)" }} />
+            </button>
+            <div className="flex-1 min-w-0">
+              <div className="font-mono text-sm truncate" style={{ color: "var(--daw-text)" }}>{rec.name}</div>
+              <div className="flex gap-3 mt-0.5">
+                <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>{rec.duration}</span>
+                <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>{rec.size}</span>
+              </div>
+            </div>
+            <a
+              href={rec.url}
+              download={`${rec.name}.webm`}
+              className="w-8 h-8 rounded flex items-center justify-center transition-all"
+              style={{ color: "var(--daw-muted)" }}
+              onMouseEnter={e => e.currentTarget.style.color = "var(--daw-cyan)"}
+              onMouseLeave={e => e.currentTarget.style.color = "var(--daw-muted)"}
+            >
+              <Icon name="Download" size={14} />
+            </a>
+            <button
+              onClick={() => deleteRec(rec.id)}
+              className="w-8 h-8 rounded flex items-center justify-center transition-all"
+              style={{ color: "var(--daw-muted)" }}
+              onMouseEnter={e => e.currentTarget.style.color = "var(--daw-red)"}
+              onMouseLeave={e => e.currentTarget.style.color = "var(--daw-muted)"}
+            >
+              <Icon name="Trash2" size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };
@@ -106,56 +399,8 @@ const EffectCard = ({
   );
 };
 
-const WaveformVisualizer = () => {
-  const bars = Array.from({ length: 48 }, (_, i) => ({
-    h: Math.random() * 60 + 10,
-    delay: `${(i * 0.04).toFixed(2)}s`,
-  }));
-  return (
-    <div className="flex items-center gap-[3px] h-20 px-4">
-      {bars.map((bar, i) => (
-        <div
-          key={i}
-          className="flex-1 rounded-full"
-          style={{
-            height: `${bar.h}%`,
-            background: i < 20
-              ? `linear-gradient(180deg, var(--daw-cyan) 0%, rgba(0,229,255,0.2) 100%)`
-              : "var(--daw-border)",
-            animation: i < 20 ? `waveform ${0.8 + Math.random() * 0.8}s ease-in-out ${bar.delay} infinite` : "none",
-            transformOrigin: "bottom",
-          }}
-        />
-      ))}
-    </div>
-  );
-};
 
 export default function Index() {
-  const [time, setTime] = useState("00:00.000");
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [bpm, setBpm] = useState(128);
-  const [seconds, setSeconds] = useState(0);
-
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    if (isPlaying) {
-      interval = setInterval(() => {
-        setSeconds(s => {
-          const ns = s + 0.1;
-          const min = Math.floor(ns / 60);
-          const sec = Math.floor(ns % 60);
-          const ms = Math.floor((ns % 1) * 1000);
-          setTime(`${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(ms).padStart(3, "0")}`);
-          return ns;
-        });
-      }, 100);
-    }
-    return () => clearInterval(interval);
-  }, [isPlaying]);
-
-  const handleStop = () => { setIsPlaying(false); setSeconds(0); setTime("00:00.000"); };
-
   const features = [
     { icon: "Waves", title: "Reverb", description: "Зальный, пластинчатый и spring-реверб с управлением затуханием и pre-delay", active: true },
     { icon: "Clock", title: "Delay", description: "Синхронизированный с BPM delay: stereo, ping-pong и tape-echo режимы", active: false },
@@ -232,12 +477,13 @@ export default function Index() {
 
           <div className="fade-up-4 flex flex-wrap gap-4">
             <button
+              onClick={() => document.getElementById("recorder")?.scrollIntoView({ behavior: "smooth" })}
               className="flex items-center gap-2 px-7 py-3.5 rounded-lg font-medium transition-all duration-300 font-plex"
-              style={{ background: "var(--daw-cyan)", color: "var(--daw-bg)", fontSize: "0.9rem" }}
-              onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 0 32px rgba(0,229,255,0.4)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
+              style={{ background: "var(--daw-red)", color: "#fff", fontSize: "0.9rem" }}
+              onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 0 32px rgba(255,23,68,0.4)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
               onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
             >
-              <Icon name="Play" size={16} style={{ color: "var(--daw-bg)" }} />
+              <div className="w-3 h-3 rounded-full bg-white recording-dot" />
               Начать запись
             </button>
             <button
@@ -253,85 +499,18 @@ export default function Index() {
         </div>
       </section>
 
-      {/* DAW Interface Preview */}
-      <section className="px-6 py-12">
+      {/* Recorder */}
+      <section className="px-6 py-12" id="recorder">
         <div className="max-w-5xl mx-auto fade-up-3">
-          <div className="rounded-2xl overflow-hidden" style={{ background: "var(--daw-surface)", border: "1px solid var(--daw-border)" }}>
-            {/* DAW Top Bar */}
-            <div className="flex items-center justify-between px-5 py-3" style={{ background: "var(--daw-surface2)", borderBottom: "1px solid var(--daw-border)" }}>
-              <div className="flex items-center gap-3">
-                <div className="flex gap-1.5">
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#ff5f57" }} />
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
-                  <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-                </div>
-                <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>trackstudio — session_01.trk</span>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="font-mono text-sm px-3 py-1 rounded" style={{ background: "var(--daw-bg)", color: "var(--daw-cyan)", border: "1px solid var(--daw-border)" }}>
-                  {time}
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>BPM</span>
-                  <button onClick={() => setBpm(b => Math.max(60, b - 1))} className="w-5 h-5 text-xs rounded flex items-center justify-center" style={{ background: "var(--daw-border)", color: "var(--daw-text)" }}>−</button>
-                  <span className="font-mono text-sm font-medium w-8 text-center" style={{ color: "var(--daw-text)" }}>{bpm}</span>
-                  <button onClick={() => setBpm(b => Math.min(200, b + 1))} className="w-5 h-5 text-xs rounded flex items-center justify-center" style={{ background: "var(--daw-border)", color: "var(--daw-text)" }}>+</button>
-                </div>
-              </div>
-            </div>
-
-            {/* Transport Controls */}
-            <div className="flex items-center gap-3 px-5 py-4" style={{ borderBottom: "1px solid var(--daw-border)" }}>
-              <button onClick={handleStop} className="w-9 h-9 rounded-lg flex items-center justify-center transition-all"
-                style={{ background: "var(--daw-surface2)", border: "1px solid var(--daw-border)" }}
-                onMouseEnter={e => e.currentTarget.style.borderColor = "var(--daw-muted)"}
-                onMouseLeave={e => e.currentTarget.style.borderColor = "var(--daw-border)"}>
-                <Icon name="Square" size={14} style={{ color: "var(--daw-muted)" }} />
-              </button>
-              <button onClick={() => setIsPlaying(v => !v)}
-                className="w-11 h-11 rounded-xl flex items-center justify-center transition-all glow-cyan"
-                style={{ background: "var(--daw-cyan)", border: "none" }}>
-                <Icon name={isPlaying ? "Pause" : "Play"} size={18} style={{ color: "var(--daw-bg)" }} />
-              </button>
-              <button className="w-9 h-9 rounded-lg flex items-center justify-center transition-all"
-                style={{ background: isPlaying ? "rgba(255,23,68,0.15)" : "var(--daw-surface2)", border: `1px solid ${isPlaying ? "var(--daw-red)" : "var(--daw-border)"}` }}>
-                <div className={`w-3 h-3 rounded-full ${isPlaying ? "recording-dot" : ""}`}
-                  style={{ background: isPlaying ? "var(--daw-red)" : "var(--daw-muted)", boxShadow: isPlaying ? "0 0 8px var(--daw-red)" : "none" }} />
-              </button>
-              <div className="flex-1 ml-2">
-                <WaveformVisualizer />
-              </div>
-              <VUMeter />
-            </div>
-
-            {/* Tracks */}
-            <div className="p-5 space-y-3">
-              {[
-                { name: "Вокал", color: "#00e5ff", vol: 85 },
-                { name: "Гитара", color: "#00e676", vol: 70 },
-                { name: "Барабаны", color: "#ff6d00", vol: 92 },
-              ].map((track, i) => (
-                <div key={i} className="flex items-center gap-4 p-3 rounded-lg" style={{ background: "var(--daw-surface2)", border: "1px solid var(--daw-border)" }}>
-                  <div className="w-20 flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full" style={{ background: track.color, boxShadow: `0 0 6px ${track.color}` }} />
-                    <span className="font-mono text-xs truncate" style={{ color: "var(--daw-text)" }}>{track.name}</span>
-                  </div>
-                  <div className="flex-1 h-8 rounded overflow-hidden" style={{ background: "var(--daw-bg)" }}>
-                    <div className="h-full rounded transition-all" style={{
-                      width: `${track.vol}%`,
-                      background: `linear-gradient(90deg, ${track.color}40, ${track.color}80)`,
-                      borderRight: `2px solid ${track.color}`,
-                    }}>
-                      <div className="h-full opacity-20" style={{
-                        backgroundImage: `repeating-linear-gradient(90deg, ${track.color} 0px, ${track.color} 1px, transparent 1px, transparent 8px)`
-                      }} />
-                    </div>
-                  </div>
-                  <span className="font-mono text-xs w-8 text-right" style={{ color: "var(--daw-muted)" }}>{track.vol}%</span>
-                </div>
-              ))}
-            </div>
+          <div className="text-center mb-8">
+            <span className="font-mono text-xs uppercase tracking-widest px-3 py-1 rounded-full" style={{ color: "var(--daw-red)", background: "rgba(255,23,68,0.08)", border: "1px solid rgba(255,23,68,0.2)" }}>
+              Live Recording
+            </span>
+            <h2 className="font-oswald font-bold mt-4" style={{ fontSize: "clamp(1.8rem, 3vw, 2.5rem)", color: "var(--daw-text)" }}>
+              СТУДИЯ <span style={{ color: "var(--daw-cyan)" }}>В БРАУЗЕРЕ</span>
+            </h2>
           </div>
+          <RecorderPanel />
         </div>
       </section>
 
