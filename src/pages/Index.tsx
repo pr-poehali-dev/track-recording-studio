@@ -1,8 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
+import Cabinet from "./Cabinet";
 
 /* ─── Types ─────────────────────────────────────────────── */
 type RecordingState = "idle" | "recording" | "paused" | "done";
+
+interface SavedTrack {
+  id: number;
+  name: string;
+  url: string;
+  duration: string;
+  color: string;
+  mimeType: string;
+  savedAt: string;
+}
 
 interface Track {
   id: number;
@@ -729,14 +740,16 @@ const formatTime = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")
 /* ─── Anime Splash Screen ────────────────────────────────── */
 const AnimeSplash = ({ onDone }: { onDone: () => void }) => {
   const [phase, setPhase] = useState<"intro" | "logo" | "title" | "out">("intro");
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
 
   useEffect(() => {
-    const t1 = setTimeout(() => setPhase("logo"), 400);
-    const t2 = setTimeout(() => setPhase("title"), 1200);
-    const t3 = setTimeout(() => setPhase("out"), 2800);
-    const t4 = setTimeout(() => onDone(), 3400);
+    const t1 = setTimeout(() => setPhase("logo"), 300);
+    const t2 = setTimeout(() => setPhase("title"), 1100);
+    const t3 = setTimeout(() => setPhase("out"), 2600);
+    const t4 = setTimeout(() => onDoneRef.current(), 3200);
     return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4); };
-  }, [onDone]);
+  }, []);
 
   return (
     <div
@@ -834,6 +847,11 @@ const AnimeSplash = ({ onDone }: { onDone: () => void }) => {
 /* ─── Main App ───────────────────────────────────────────── */
 export default function Index() {
   const [showSplash, setShowSplash] = useState(true);
+  const [showCabinet, setShowCabinet] = useState(false);
+  const [savedTracks, setSavedTracks] = useState<SavedTrack[]>(() => {
+    try { return JSON.parse(localStorage.getItem("cheburek_saved_tracks") || "[]"); } catch { return []; }
+  });
+  const savedCounterRef = useRef(savedTracks.length);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -994,8 +1012,57 @@ export default function Index() {
     setTracks(prev => prev.filter(t => t.id !== id));
   };
 
+  /* ─ save track to cabinet ─ */
+  const saveTrackToCabinet = (track: Track) => {
+    if (!track.url) return;
+    savedCounterRef.current += 1;
+    const now = new Date();
+    const savedAt = `${now.getDate()}.${now.getMonth() + 1}.${now.getFullYear()}`;
+    const mimeType = track.url.startsWith("blob") ? (
+      MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm" :
+      MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "audio/webm"
+    ) : "audio/webm";
+
+    const saved: SavedTrack = {
+      id: savedCounterRef.current,
+      name: track.name,
+      url: track.url,
+      duration: track.duration || "0:00",
+      color: track.color,
+      mimeType,
+      savedAt,
+    };
+    setSavedTracks(prev => {
+      const updated = [saved, ...prev];
+      localStorage.setItem("cheburek_saved_tracks", JSON.stringify(
+        updated.map(t => ({ ...t, url: "" })) // не сохраняем blob-url в localStorage
+      ));
+      return updated;
+    });
+  };
+
+  /* ─ cabinet helpers ─ */
+  const deleteFromCabinet = (id: number) => {
+    setSavedTracks(prev => prev.filter(t => t.id !== id));
+  };
+
+  const renameInCabinet = (id: number, name: string) => {
+    setSavedTracks(prev => prev.map(t => t.id === id ? { ...t, name } : t));
+  };
+
   const isRec = recorder.state === "recording";
   const isPaused = recorder.state === "paused";
+
+  if (showCabinet) {
+    return (
+      <Cabinet
+        tracks={savedTracks}
+        onBack={() => setShowCabinet(false)}
+        onDeleteTrack={deleteFromCabinet}
+        onRenameTrack={renameInCabinet}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen overflow-hidden select-none" style={{ background: "#080f16", color: "#e2f4ff", fontFamily: "IBM Plex Sans, sans-serif", maxWidth: 480, margin: "0 auto" }}>
@@ -1016,8 +1083,20 @@ export default function Index() {
           </span>
         </div>
 
-        <button className="w-9 h-9 flex items-center justify-center rounded-full" style={{ background: "#0d1e2c" }}>
-          <Icon name="Upload" size={18} style={{ color: "#4a6070" }} />
+        <button
+          className="w-9 h-9 flex items-center justify-center rounded-full relative transition-all"
+          style={{ background: "#0d1e2c", border: savedTracks.length > 0 ? "1px solid rgba(0,194,255,0.3)" : "none" }}
+          onClick={() => setShowCabinet(true)}
+          onMouseEnter={e => e.currentTarget.style.background = "#132030"}
+          onMouseLeave={e => e.currentTarget.style.background = "#0d1e2c"}
+        >
+          <Icon name="User" size={18} style={{ color: "#00c2ff" }} />
+          {savedTracks.length > 0 && (
+            <div className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center font-mono text-[9px] font-bold"
+              style={{ background: "#ef4444", color: "#fff" }}>
+              {savedTracks.length > 9 ? "9+" : savedTracks.length}
+            </div>
+          )}
         </button>
       </div>
 
@@ -1115,6 +1194,18 @@ export default function Index() {
                       >
                         <Icon name="Piano" size={10} />
                         Играть
+                      </button>
+                    )}
+                    {track.hasAudio && track.url && (
+                      <button
+                        className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all"
+                        style={{ background: "rgba(0,230,118,0.12)", color: "#00e676", border: "1px solid rgba(0,230,118,0.35)" }}
+                        onClick={e => { e.stopPropagation(); saveTrackToCabinet(track); }}
+                        onMouseEnter={e => { e.currentTarget.style.background = "rgba(0,230,118,0.22)"; e.currentTarget.style.boxShadow = "0 0 8px rgba(0,230,118,0.3)"; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = "rgba(0,230,118,0.12)"; e.currentTarget.style.boxShadow = "none"; }}
+                      >
+                        <Icon name="Save" size={9} />
+                        Сохранить
                       </button>
                     )}
                   </div>
