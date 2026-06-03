@@ -1,180 +1,292 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 
-const VUMeter = ({ levels }: { levels?: number[] }) => {
-  const bars = [1, 2, 3, 4, 5, 6, 7, 8];
-  const classes = [
-    "vu-bar-1", "vu-bar-2", "vu-bar-3", "vu-bar-4",
-    "vu-bar-5", "vu-bar-6", "vu-bar-7", "vu-bar-8"
-  ];
-  const colors = [
-    "#00e676", "#00e676", "#00e676", "#00e676",
-    "#00e676", "#69f0ae", "#ffeb3b", "#ff1744"
-  ];
+/* ─── Types ─────────────────────────────────────────────── */
+type RecordingState = "idle" | "recording" | "paused" | "done";
+
+interface Track {
+  id: number;
+  name: string;
+  color: string;
+  icon: string;
+  hasAudio: boolean;
+  url?: string;
+  duration?: string;
+  waveform?: number[];
+  fx: string[];
+  muted: boolean;
+  solo: boolean;
+}
+
+/* ─── Waveform bar ───────────────────────────────────────── */
+const WaveBar = ({ val, color, live }: { val: number; color: string; live?: boolean }) => (
+  <div className="flex-1 flex flex-col justify-center" style={{ height: "100%" }}>
+    <div style={{
+      height: `${Math.max(4, val)}%`,
+      background: color,
+      borderRadius: 2,
+      transition: live ? "height 0.05s" : "none",
+      opacity: 0.85,
+    }} />
+  </div>
+);
+
+/* ─── Track waveform display ─────────────────────────────── */
+const TrackWave = ({ waveform, color, playing }: { waveform: number[]; color: string; playing?: boolean }) => (
+  <div className="flex items-center gap-[1.5px]" style={{ height: 40, flex: 1, overflow: "hidden" }}>
+    {waveform.map((v, i) => (
+      <WaveBar key={i} val={v} color={playing ? color : color + "99"} />
+    ))}
+  </div>
+);
+
+/* ─── Add Track Sheet ────────────────────────────────────── */
+const trackTypes = [
+  { icon: "Mic", label: "Голос/Аудио", sub: "Запись с AutoPitch и эффектами", color: "#ef4444", type: "voice" },
+  { icon: "Guitar", label: "Гитара", sub: "Усилители и эффекты", color: "#06b6d4", type: "guitar" },
+  { icon: "Music2", label: "Бас", sub: "Найди свой фирменный тон", color: "#3b82f6", type: "bass" },
+  { icon: "RefreshCw", label: "Лупер", sub: "Полноценные дорожки без труда", color: "#f59e0b", type: "looper" },
+  { icon: "Piano", label: "Виртуальные инструменты", sub: "Комплекты, ключи и другое", color: "#10b981", type: "vst", badge: "MIDI" },
+  { icon: "Layers", label: "Сэмплер", sub: "Превратите любой звук в инструмент", color: "#8b5cf6", type: "sampler", badge: "MIDI" },
+  { icon: "Grid", label: "Драм-машина", sub: "Создавайте биты за считанные секунды", color: "#f97316", type: "drums", badge: "MIDI" },
+];
+
+const AddTrackSheet = ({ onClose, onAdd }: { onClose: () => void; onAdd: (type: string, name: string, color: string, icon: string) => void }) => (
+  <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.7)" }} onClick={onClose}>
+    <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0f1923", maxHeight: "85vh" }} onClick={e => e.stopPropagation()}>
+      <div className="flex justify-center pt-3 pb-2">
+        <div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} />
+      </div>
+      <div className="flex items-center justify-between px-5 pb-4">
+        <span className="text-xl font-bold" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif", letterSpacing: "0.03em" }}>
+          Добавить дорожку
+        </span>
+        <button className="px-4 py-1.5 rounded-full font-bold text-sm" style={{ background: "#00c2ff", color: "#000" }}>
+          Pro
+        </button>
+      </div>
+      <div className="overflow-y-auto px-4 pb-6 space-y-1" style={{ maxHeight: "55vh" }}>
+        {trackTypes.map(t => (
+          <button
+            key={t.type}
+            className="w-full flex items-center gap-4 p-3 rounded-2xl transition-all"
+            style={{ background: "transparent" }}
+            onMouseEnter={e => e.currentTarget.style.background = "rgba(0,194,255,0.07)"}
+            onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+            onClick={() => { onAdd(t.type, t.label, t.color, t.icon); onClose(); }}
+          >
+            <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0" style={{ background: t.color }}>
+              <Icon name={t.icon} size={22} style={{ color: "#fff" }} />
+            </div>
+            <div className="text-left flex-1">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold" style={{ color: "#e2f4ff" }}>{t.label}</span>
+                {t.badge && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold" style={{ background: "#1e2d3a", color: "#7ab" }}>{t.badge}</span>
+                )}
+              </div>
+              <span className="text-sm" style={{ color: "#4a6070" }}>{t.sub}</span>
+            </div>
+          </button>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-3 px-4 pb-6 pt-2" style={{ borderTop: "1px solid #1a2530" }}>
+        <ImportButton icon="FileMusic" label="Импортировать" sub="Аудио, видео или файл" />
+        <ImportButton icon="Music" label="Звонки & семплы" sub="Из телефона и библиотеки" />
+      </div>
+    </div>
+  </div>
+);
+
+const ImportButton = ({ icon, label, sub }: { icon: string; label: string; sub: string }) => (
+  <button className="flex items-center gap-3 p-3 rounded-2xl transition-all" style={{ background: "#141e28" }}
+    onMouseEnter={e => e.currentTarget.style.background = "#1a2a38"}
+    onMouseLeave={e => e.currentTarget.style.background = "#141e28"}>
+    <Icon name={icon} size={20} style={{ color: "#00c2ff" }} />
+    <div className="text-left">
+      <div className="text-sm font-semibold" style={{ color: "#e2f4ff" }}>{label}</div>
+      <div className="text-xs" style={{ color: "#4a6070" }}>{sub}</div>
+    </div>
+  </button>
+);
+
+/* ─── FX Sheet ───────────────────────────────────────────── */
+const fxList = [
+  { name: "Reverb", icon: "Waves", color: "#00c2ff" },
+  { name: "Delay", icon: "Clock", color: "#7c3aed" },
+  { name: "Компрессор", icon: "Activity", color: "#10b981" },
+  { name: "EQ", icon: "BarChart2", color: "#f59e0b" },
+  { name: "Chorus", icon: "Radio", color: "#ec4899" },
+  { name: "AutoPitch", icon: "TrendingUp", color: "#ef4444" },
+];
+
+const FxSheet = ({ trackName, onClose }: { trackName: string; onClose: () => void }) => {
+  const [active, setActive] = useState<string[]>(["Reverb"]);
   return (
-    <div className="flex items-end gap-[3px] h-14">
-      {bars.map((_, i) => (
-        <div key={i} className="w-2 rounded-sm" style={{ backgroundColor: colors[i] + "15", position: "relative", height: "100%" }}>
-          <div
-            className={`w-full rounded-sm absolute bottom-0 ${levels ? "" : classes[i]}`}
-            style={{
-              backgroundColor: colors[i],
-              boxShadow: `0 0 6px ${colors[i]}80`,
-              height: levels ? `${Math.min(100, levels[i] || 0)}%` : undefined,
-              transition: levels ? "height 0.05s ease-out" : undefined,
-            }}
-          />
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.75)" }} onClick={onClose}>
+      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0f1923" }} onClick={e => e.stopPropagation()}>
+        <div className="flex justify-center pt-3 pb-2"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+        <div className="px-5 pb-3 flex items-center justify-between">
+          <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>
+            +FX — {trackName}
+          </span>
+          <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
         </div>
-      ))}
+        <div className="grid grid-cols-3 gap-3 px-4 pb-8">
+          {fxList.map(fx => {
+            const on = active.includes(fx.name);
+            return (
+              <button key={fx.name} onClick={() => setActive(v => on ? v.filter(x => x !== fx.name) : [...v, fx.name])}
+                className="flex flex-col items-center gap-2 p-4 rounded-2xl transition-all"
+                style={{ background: on ? fx.color + "22" : "#141e28", border: `1px solid ${on ? fx.color : "#1e2d3a"}` }}>
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: on ? fx.color : "#1e2d3a" }}>
+                  <Icon name={fx.icon} size={18} style={{ color: on ? "#fff" : "#4a6070" }} />
+                </div>
+                <span className="text-xs font-semibold" style={{ color: on ? fx.color : "#7ab" }}>{fx.name}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };
 
-type RecordingState = "idle" | "recording" | "paused" | "done";
+/* ─── AutoPitch modal ────────────────────────────────────── */
+const AutoPitchModal = ({ onClose }: { onClose: () => void }) => {
+  const [scale, setScale] = useState("C Major");
+  const [amount, setAmount] = useState(80);
+  const scales = ["C Major", "C# Major", "D Major", "Eb Major", "E Major", "F Major", "G Major", "A Major", "Bb Major", "B Major", "A Minor", "D Minor"];
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end" style={{ background: "rgba(0,0,0,0.75)" }} onClick={onClose}>
+      <div className="rounded-t-3xl overflow-hidden" style={{ background: "#0f1923" }} onClick={e => e.stopPropagation()}>
+        <div className="flex justify-center pt-3 pb-2"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+        <div className="px-5 pt-2 pb-2 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "#ef4444" }}>
+              <Icon name="TrendingUp" size={16} style={{ color: "#fff" }} />
+            </div>
+            <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>AutoPitch</span>
+          </div>
+          <button onClick={onClose}><Icon name="X" size={20} style={{ color: "#4a6070" }} /></button>
+        </div>
+        <div className="px-5 pb-6 space-y-5">
+          <div>
+            <label className="text-xs font-mono uppercase" style={{ color: "#4a6070", letterSpacing: "0.08em" }}>Тональность</label>
+            <div className="grid grid-cols-4 gap-2 mt-2">
+              {scales.slice(0, 8).map(s => (
+                <button key={s} onClick={() => setScale(s)}
+                  className="py-2 rounded-xl text-xs font-medium transition-all"
+                  style={{ background: scale === s ? "#00c2ff" : "#141e28", color: scale === s ? "#000" : "#7ab", border: `1px solid ${scale === s ? "#00c2ff" : "#1e2d3a"}` }}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="flex justify-between mb-2">
+              <label className="text-xs font-mono uppercase" style={{ color: "#4a6070", letterSpacing: "0.08em" }}>Коррекция</label>
+              <span className="text-sm font-bold" style={{ color: "#00c2ff" }}>{amount}%</span>
+            </div>
+            <input type="range" min={0} max={100} value={amount} onChange={e => setAmount(+e.target.value)} className="w-full accent-cyan-400" style={{ accentColor: "#00c2ff" }} />
+          </div>
+          <button className="w-full py-3.5 rounded-2xl font-bold text-base transition-all" style={{ background: "#00c2ff", color: "#000" }}
+            onMouseEnter={e => e.currentTarget.style.boxShadow = "0 0 24px rgba(0,194,255,0.4)"}
+            onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}>
+            Применить AutoPitch
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
-interface RecordingEntry {
-  id: number;
-  name: string;
-  url: string;
-  duration: string;
-  size: string;
-}
-
-const RecorderPanel = () => {
+/* ─── Main Recorder with live levels ────────────────────── */
+const useRecorder = () => {
   const [state, setState] = useState<RecordingState>("idle");
   const [recTime, setRecTime] = useState(0);
-  const [vuLevels, setVuLevels] = useState<number[]>(new Array(8).fill(0));
-  const [recordings, setRecordings] = useState<RecordingEntry[]>([]);
+  const [vuLevels, setVuLevels] = useState<number[]>(new Array(32).fill(0));
   const [error, setError] = useState("");
-  const [playingId, setPlayingId] = useState<number | null>(null);
-
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const audioRefs = useRef<Record<number, HTMLAudioElement>>({});
-  const counterRef = useRef(0);
-
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  };
-
-  const formatBytes = (b: number) => b < 1024 * 1024 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1024 / 1024).toFixed(1)} MB`;
+  const recTimeRef = useRef(0);
 
   const animateVU = useCallback(() => {
     if (!analyserRef.current) return;
     const data = new Uint8Array(analyserRef.current.frequencyBinCount);
     analyserRef.current.getByteFrequencyData(data);
-    const step = Math.floor(data.length / 8);
-    const lvls = Array.from({ length: 8 }, (_, i) => {
+    const step = Math.floor(data.length / 32);
+    const lvls = Array.from({ length: 32 }, (_, i) => {
       const slice = data.slice(i * step, (i + 1) * step);
-      const avg = slice.reduce((a, b) => a + b, 0) / slice.length;
-      return (avg / 255) * 100;
+      return (slice.reduce((a, b) => a + b, 0) / slice.length / 255) * 100;
     });
     setVuLevels(lvls);
     animFrameRef.current = requestAnimationFrame(animateVU);
   }, []);
 
-  const startRecording = async () => {
+  const start = async (): Promise<{ url: string; duration: string; waveform: number[] } | null> => {
     setError("");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-
       const ctx = new AudioContext();
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 256;
       src.connect(analyser);
       analyserRef.current = analyser;
-
       const mr = new MediaRecorder(stream);
       mediaRecorderRef.current = mr;
       chunksRef.current = [];
-
       mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        const url = URL.createObjectURL(blob);
-        counterRef.current += 1;
-        setRecordings(prev => [...prev, {
-          id: counterRef.current,
-          name: `Запись ${counterRef.current}`,
-          url,
-          duration: formatTime(recTimeRef.current),
-          size: formatBytes(blob.size),
-        }]);
-        setVuLevels(new Array(8).fill(0));
-        cancelAnimationFrame(animFrameRef.current);
-      };
-
       mr.start(100);
       setState("recording");
       setRecTime(0);
       recTimeRef.current = 0;
-      timerRef.current = setInterval(() => {
-        recTimeRef.current += 1;
-        setRecTime(t => t + 1);
-      }, 1000);
+      timerRef.current = setInterval(() => { recTimeRef.current += 1; setRecTime(t => t + 1); }, 1000);
       animateVU();
+      return null;
     } catch {
-      setError("Нет доступа к микрофону. Разреши доступ в браузере.");
+      setError("Нет доступа к микрофону");
+      return null;
     }
   };
 
-  const recTimeRef = useRef(0);
-
-  const stopRecording = () => {
-    mediaRecorderRef.current?.stop();
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    if (timerRef.current) clearInterval(timerRef.current);
-    setState("done");
-    setRecTime(0);
-  };
-
-  const pauseResume = () => {
-    if (state === "recording") {
-      mediaRecorderRef.current?.pause();
+  const stop = (): Promise<{ url: string; duration: string; waveform: number[] }> =>
+    new Promise(resolve => {
+      if (!mediaRecorderRef.current) return;
+      mediaRecorderRef.current.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const url = URL.createObjectURL(blob);
+        const duration = formatTime(recTimeRef.current);
+        const waveform = Array.from({ length: 60 }, () => Math.random() * 80 + 10);
+        setVuLevels(new Array(32).fill(0));
+        cancelAnimationFrame(animFrameRef.current);
+        resolve({ url, duration, waveform });
+      };
+      mediaRecorderRef.current.stop();
+      streamRef.current?.getTracks().forEach(t => t.stop());
       if (timerRef.current) clearInterval(timerRef.current);
-      cancelAnimationFrame(animFrameRef.current);
-      setVuLevels(new Array(8).fill(0));
-      setState("paused");
-    } else if (state === "paused") {
-      mediaRecorderRef.current?.resume();
-      timerRef.current = setInterval(() => {
-        recTimeRef.current += 1;
-        setRecTime(t => t + 1);
-      }, 1000);
-      animateVU();
-      setState("recording");
-    }
+      setState("done");
+    });
+
+  const pause = () => {
+    mediaRecorderRef.current?.pause();
+    if (timerRef.current) clearInterval(timerRef.current);
+    cancelAnimationFrame(animFrameRef.current);
+    setVuLevels(new Array(32).fill(0));
+    setState("paused");
   };
 
-  const togglePlay = (rec: RecordingEntry) => {
-    if (playingId === rec.id) {
-      audioRefs.current[rec.id]?.pause();
-      setPlayingId(null);
-    } else {
-      Object.values(audioRefs.current).forEach(a => a.pause());
-      if (!audioRefs.current[rec.id]) {
-        const audio = new Audio(rec.url);
-        audio.onended = () => setPlayingId(null);
-        audioRefs.current[rec.id] = audio;
-      }
-      audioRefs.current[rec.id].play();
-      setPlayingId(rec.id);
-    }
-  };
-
-  const deleteRec = (id: number) => {
-    audioRefs.current[id]?.pause();
-    delete audioRefs.current[id];
-    if (playingId === id) setPlayingId(null);
-    setRecordings(prev => prev.filter(r => r.id !== id));
+  const resume = () => {
+    mediaRecorderRef.current?.resume();
+    timerRef.current = setInterval(() => { recTimeRef.current += 1; setRecTime(t => t + 1); }, 1000);
+    animateVU();
+    setState("recording");
   };
 
   useEffect(() => () => {
@@ -182,421 +294,342 @@ const RecorderPanel = () => {
     if (timerRef.current) clearInterval(timerRef.current);
   }, []);
 
-  return (
-    <div className="rounded-2xl overflow-hidden" style={{ background: "var(--daw-surface)", border: "1px solid var(--daw-border)" }}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-5 py-3" style={{ background: "var(--daw-surface2)", borderBottom: "1px solid var(--daw-border)" }}>
-        <div className="flex items-center gap-3">
-          <div className="flex gap-1.5">
-            <div className="w-3 h-3 rounded-full" style={{ background: "#ff5f57" }} />
-            <div className="w-3 h-3 rounded-full" style={{ background: "#febc2e" }} />
-            <div className="w-3 h-3 rounded-full" style={{ background: "#28c840" }} />
-          </div>
-          <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>trackstudio — session_01.trk</span>
-        </div>
-        <div className="flex items-center gap-2">
-          {state === "recording" && (
-            <div className="flex items-center gap-2">
-              <div className="recording-dot w-2 h-2 rounded-full" style={{ background: "var(--daw-red)" }} />
-              <span className="font-mono text-xs" style={{ color: "var(--daw-red)" }}>REC {formatTime(recTime)}</span>
-            </div>
-          )}
-          {state === "paused" && (
-            <span className="font-mono text-xs" style={{ color: "var(--daw-orange)" }}>ПАУЗА {formatTime(recTime)}</span>
-          )}
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div className="flex items-center gap-3 px-5 py-4" style={{ borderBottom: "1px solid var(--daw-border)" }}>
-        {state === "idle" || state === "done" ? (
-          <button
-            onClick={startRecording}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-all duration-300 font-plex"
-            style={{ background: "var(--daw-red)", color: "#fff", fontSize: "0.85rem" }}
-            onMouseEnter={e => e.currentTarget.style.boxShadow = "0 0 20px rgba(255,23,68,0.4)"}
-            onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}
-          >
-            <div className="w-3 h-3 rounded-full bg-white" />
-            Начать запись
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={stopRecording}
-              className="w-10 h-10 rounded-lg flex items-center justify-center transition-all"
-              style={{ background: "var(--daw-surface2)", border: "1px solid var(--daw-border)" }}
-            >
-              <Icon name="Square" size={14} style={{ color: "var(--daw-muted)" }} />
-            </button>
-            <button
-              onClick={pauseResume}
-              className="w-10 h-10 rounded-xl flex items-center justify-center transition-all"
-              style={{ background: state === "paused" ? "var(--daw-cyan)" : "var(--daw-surface2)", border: `1px solid ${state === "paused" ? "var(--daw-cyan)" : "var(--daw-border)"}` }}
-            >
-              <Icon name={state === "paused" ? "Play" : "Pause"} size={16} style={{ color: state === "paused" ? "var(--daw-bg)" : "var(--daw-muted)" }} />
-            </button>
-          </>
-        )}
-
-        <div className="flex-1 flex items-end gap-[3px] h-10 mx-2">
-          {Array.from({ length: 32 }).map((_, i) => (
-            <div
-              key={i}
-              className="flex-1 rounded-full transition-all"
-              style={{
-                height: state === "recording" ? `${Math.min(100, (vuLevels[i % 8] || 0) * (0.5 + Math.random() * 0.5))}%` : "15%",
-                background: state === "recording"
-                  ? `linear-gradient(180deg, var(--daw-cyan) 0%, rgba(0,229,255,0.3) 100%)`
-                  : "var(--daw-border)",
-                transition: "height 0.05s ease-out",
-              }}
-            />
-          ))}
-        </div>
-
-        <VUMeter levels={state === "recording" ? vuLevels : undefined} />
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="mx-5 mt-4 px-4 py-3 rounded-lg flex items-center gap-2" style={{ background: "rgba(255,23,68,0.1)", border: "1px solid rgba(255,23,68,0.3)" }}>
-          <Icon name="AlertCircle" size={14} style={{ color: "var(--daw-red)" }} />
-          <span className="text-sm" style={{ color: "var(--daw-red)" }}>{error}</span>
-        </div>
-      )}
-
-      {/* Recordings list */}
-      <div className="p-5 space-y-2">
-        {recordings.length === 0 ? (
-          <div className="text-center py-8">
-            <Icon name="Mic" size={28} style={{ color: "var(--daw-border)", margin: "0 auto 8px" }} />
-            <p className="text-sm" style={{ color: "var(--daw-muted)" }}>Нет записей. Нажми «Начать запись»</p>
-          </div>
-        ) : recordings.map(rec => (
-          <div key={rec.id} className="flex items-center gap-3 p-3 rounded-lg transition-all"
-            style={{ background: "var(--daw-surface2)", border: "1px solid var(--daw-border)" }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = "var(--daw-border)"}
-          >
-            <button
-              onClick={() => togglePlay(rec)}
-              className="w-9 h-9 rounded-lg flex-shrink-0 flex items-center justify-center transition-all"
-              style={{ background: playingId === rec.id ? "var(--daw-cyan)" : "var(--daw-bg)", border: `1px solid ${playingId === rec.id ? "var(--daw-cyan)" : "var(--daw-border)"}` }}
-            >
-              <Icon name={playingId === rec.id ? "Pause" : "Play"} size={14} style={{ color: playingId === rec.id ? "var(--daw-bg)" : "var(--daw-muted)" }} />
-            </button>
-            <div className="flex-1 min-w-0">
-              <div className="font-mono text-sm truncate" style={{ color: "var(--daw-text)" }}>{rec.name}</div>
-              <div className="flex gap-3 mt-0.5">
-                <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>{rec.duration}</span>
-                <span className="font-mono text-xs" style={{ color: "var(--daw-muted)" }}>{rec.size}</span>
-              </div>
-            </div>
-            <a
-              href={rec.url}
-              download={`${rec.name}.webm`}
-              className="w-8 h-8 rounded flex items-center justify-center transition-all"
-              style={{ color: "var(--daw-muted)" }}
-              onMouseEnter={e => e.currentTarget.style.color = "var(--daw-cyan)"}
-              onMouseLeave={e => e.currentTarget.style.color = "var(--daw-muted)"}
-            >
-              <Icon name="Download" size={14} />
-            </a>
-            <button
-              onClick={() => deleteRec(rec.id)}
-              className="w-8 h-8 rounded flex items-center justify-center transition-all"
-              style={{ color: "var(--daw-muted)" }}
-              onMouseEnter={e => e.currentTarget.style.color = "var(--daw-red)"}
-              onMouseLeave={e => e.currentTarget.style.color = "var(--daw-muted)"}
-            >
-              <Icon name="Trash2" size={14} />
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+  return { state, recTime, vuLevels, error, start, stop, pause, resume };
 };
 
-const KnobControl = ({ label, value, color = "#00e5ff" }: { label: string; value: number; color?: string }) => {
-  const [val, setVal] = useState(value);
-  const angle = -135 + val * 270;
-  return (
-    <div className="flex flex-col items-center gap-2">
-      <div
-        className="relative w-12 h-12 rounded-full cursor-pointer select-none"
-        style={{ background: `var(--daw-surface2)`, border: `2px solid var(--daw-border)` }}
-        onClick={() => setVal(v => v >= 1 ? 0 : Math.min(1, v + 0.1))}
-      >
-        <svg className="absolute inset-0 w-full h-full" viewBox="0 0 48 48">
-          <circle cx="24" cy="24" r="20" fill="none" stroke="var(--daw-border)" strokeWidth="3" strokeLinecap="round"
-            strokeDasharray="94 125" strokeDashoffset="-16" />
-          <circle cx="24" cy="24" r="20" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round"
-            strokeDasharray={`${val * 94} 125`} strokeDashoffset="-16"
-            style={{ filter: `drop-shadow(0 0 4px ${color})`, transition: 'stroke-dasharray 0.2s' }} />
-        </svg>
-        <div
-          className="absolute inset-0 flex items-center justify-center"
-          style={{ transform: `rotate(${angle}deg)` }}
-        >
-          <div className="w-1 h-4 rounded-full" style={{ backgroundColor: color, marginTop: "2px" }} />
-        </div>
-      </div>
-      <span className="text-xs font-mono uppercase" style={{ color: "var(--daw-muted)", letterSpacing: "0.08em" }}>{label}</span>
-    </div>
-  );
-};
+const formatTime = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
-const EffectCard = ({
-  title, description, icon, delay, active
-}: { title: string; description: string; icon: string; delay: string; active?: boolean }) => {
-  const [on, setOn] = useState(active || false);
-  return (
-    <div
-      className={`relative rounded-xl p-5 cursor-pointer transition-all duration-300 fade-up-${delay}`}
-      style={{
-        background: on ? "linear-gradient(135deg, rgba(0,229,255,0.08), rgba(0,229,255,0.03))" : "var(--daw-surface)",
-        border: `1px solid ${on ? "rgba(0,229,255,0.35)" : "var(--daw-border)"}`,
-        boxShadow: on ? "0 0 24px rgba(0,229,255,0.1)" : "none",
-      }}
-      onClick={() => setOn(v => !v)}
-    >
-      <div className="flex items-start justify-between mb-4">
-        <div
-          className="w-10 h-10 rounded-lg flex items-center justify-center"
-          style={{
-            background: on ? "rgba(0,229,255,0.15)" : "var(--daw-surface2)",
-            border: `1px solid ${on ? "rgba(0,229,255,0.4)" : "var(--daw-border)"}`,
-          }}
-        >
-          <Icon name={icon} fallback="Zap" size={18} style={{ color: on ? "var(--daw-cyan)" : "var(--daw-muted)" }} />
-        </div>
-        <div
-          className="w-8 h-4 rounded-full transition-all duration-300 relative"
-          style={{ background: on ? "var(--daw-cyan)" : "var(--daw-border)" }}
-        >
-          <div
-            className="absolute top-0.5 w-3 h-3 rounded-full transition-all duration-300"
-            style={{
-              background: on ? "var(--daw-bg)" : "var(--daw-muted)",
-              left: on ? "calc(100% - 14px)" : "2px"
-            }}
-          />
-        </div>
-      </div>
-      <h3 className="font-oswald text-base font-medium mb-1.5" style={{ color: on ? "var(--daw-cyan)" : "var(--daw-text)", letterSpacing: "0.04em" }}>
-        {title}
-      </h3>
-      <p className="text-sm leading-relaxed" style={{ color: "var(--daw-muted)" }}>{description}</p>
-      {on && (
-        <div className="flex gap-3 mt-4 pt-4" style={{ borderTop: "1px solid rgba(0,229,255,0.1)" }}>
-          <KnobControl label="Mix" value={0.7} />
-          <KnobControl label="Depth" value={0.5} />
-          <KnobControl label="Rate" value={0.4} />
-        </div>
-      )}
-    </div>
-  );
-};
-
-
+/* ─── Main App ───────────────────────────────────────────── */
 export default function Index() {
-  const features = [
-    { icon: "Waves", title: "Reverb", description: "Зальный, пластинчатый и spring-реверб с управлением затуханием и pre-delay", active: true },
-    { icon: "Clock", title: "Delay", description: "Синхронизированный с BPM delay: stereo, ping-pong и tape-echo режимы", active: false },
-    { icon: "Activity", title: "Компрессор", description: "Прозрачная компрессия с контролем threshold, ratio, attack и release", active: true },
-    { icon: "Zap", title: "EQ", description: "4-полосный параметрический эквалайзер для точной обработки частот", active: false },
-    { icon: "Radio", title: "Chorus", description: "Пространственный хорус и фленджер для объёмного звучания", active: false },
-    { icon: "TrendingUp", title: "Лимитер", description: "Финальный brickwall лимитер для громкости мастера без клипинга", active: false },
-  ];
+  const [tracks, setTracks] = useState<Track[]>([]);
+  const [playhead, setPlayhead] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [showAddSheet, setShowAddSheet] = useState(false);
+  const [showFx, setShowFx] = useState<number | null>(null);
+  const [showAutoPitch, setShowAutoPitch] = useState(false);
+  const [activeTrackId, setActiveTrackId] = useState<number | null>(null);
+  const [playingTrackId, setPlayingTrackId] = useState<number | null>(null);
+  const audioRefs = useRef<Record<number, HTMLAudioElement>>({});
+  const counterRef = useRef(0);
+  const playheadRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const recorder = useRecorder();
+
+  const activeTrack = tracks.find(t => t.id === activeTrackId);
+
+  /* ─ playhead tick ─ */
+  useEffect(() => {
+    if (playing) {
+      playheadRef.current = setInterval(() => setPlayhead(p => p + 1), 100);
+    } else {
+      if (playheadRef.current) clearInterval(playheadRef.current);
+    }
+    return () => { if (playheadRef.current) clearInterval(playheadRef.current); };
+  }, [playing]);
+
+  /* ─ add track ─ */
+  const addTrack = (type: string, name: string, color: string, icon: string) => {
+    counterRef.current += 1;
+    const newTrack: Track = {
+      id: counterRef.current,
+      name: type === "voice" ? `Голос/Аудио ${counterRef.current}` : name,
+      color,
+      icon,
+      hasAudio: false,
+      fx: [],
+      muted: false,
+      solo: false,
+      waveform: Array.from({ length: 60 }, () => 0),
+    };
+    setTracks(prev => [...prev, newTrack]);
+    setActiveTrackId(newTrack.id);
+  };
+
+  /* ─ start recording on active track ─ */
+  const handleRecord = async () => {
+    if (recorder.state === "idle" || recorder.state === "done") {
+      if (!activeTrackId) {
+        counterRef.current += 1;
+        const id = counterRef.current;
+        setTracks(prev => [...prev, { id, name: `Голос/Аудио ${id}`, color: "#ef4444", icon: "Mic", hasAudio: false, fx: [], muted: false, solo: false, waveform: Array.from({ length: 60 }, () => 0) }]);
+        setActiveTrackId(id);
+      }
+      await recorder.start();
+    } else if (recorder.state === "recording") {
+      const result = await recorder.stop();
+      if (result && activeTrackId) {
+        setTracks(prev => prev.map(t => t.id === activeTrackId ? { ...t, hasAudio: true, url: result.url, duration: result.duration, waveform: result.waveform } : t));
+      }
+    } else if (recorder.state === "paused") {
+      recorder.resume();
+    }
+  };
+
+  /* ─ play/pause track ─ */
+  const togglePlayTrack = (track: Track) => {
+    if (!track.url) return;
+    if (playingTrackId === track.id) {
+      audioRefs.current[track.id]?.pause();
+      setPlayingTrackId(null);
+    } else {
+      Object.values(audioRefs.current).forEach(a => a.pause());
+      if (!audioRefs.current[track.id]) {
+        const audio = new Audio(track.url);
+        audio.onended = () => setPlayingTrackId(null);
+        audioRefs.current[track.id] = audio;
+      }
+      audioRefs.current[track.id].play();
+      setPlayingTrackId(track.id);
+    }
+  };
+
+  /* ─ import file ─ */
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const waveform = Array.from({ length: 60 }, () => Math.random() * 80 + 15);
+    counterRef.current += 1;
+    const id = counterRef.current;
+    setTracks(prev => [...prev, { id, name: file.name.replace(/\.[^.]+$/, ""), color: "#06b6d4", icon: "FileMusic", hasAudio: true, url, duration: "—", waveform, fx: [], muted: false, solo: false }]);
+    setActiveTrackId(id);
+    e.target.value = "";
+  };
+
+  /* ─ delete track ─ */
+  const deleteTrack = (id: number) => {
+    audioRefs.current[id]?.pause();
+    delete audioRefs.current[id];
+    if (playingTrackId === id) setPlayingTrackId(null);
+    if (activeTrackId === id) setActiveTrackId(null);
+    setTracks(prev => prev.filter(t => t.id !== id));
+  };
+
+  const isRec = recorder.state === "recording";
+  const isPaused = recorder.state === "paused";
 
   return (
-    <div className="min-h-screen noise-overlay" style={{ background: "var(--daw-bg)", color: "var(--daw-text)" }}>
+    <div className="flex flex-col h-screen overflow-hidden select-none" style={{ background: "#080f16", color: "#e2f4ff", fontFamily: "IBM Plex Sans, sans-serif", maxWidth: 480, margin: "0 auto" }}>
 
-      {/* Header / Nav */}
-      <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 py-3"
-        style={{ background: "rgba(13,15,18,0.9)", backdropFilter: "blur(20px)", borderBottom: "1px solid var(--daw-border)" }}>
-        <div className="flex items-center gap-3">
-          <div className="w-7 h-7 rounded flex items-center justify-center"
-            style={{ background: "var(--daw-cyan)", boxShadow: "0 0 12px rgba(0,229,255,0.5)" }}>
-            <Icon name="Mic2" size={14} style={{ color: "var(--daw-bg)" }} />
-          </div>
-          <span className="font-oswald font-semibold text-lg tracking-widest uppercase" style={{ color: "var(--daw-text)" }}>
-            Track<span style={{ color: "var(--daw-cyan)" }}>Studio</span>
+      {/* ── Top Bar ── */}
+      <div className="flex-shrink-0 flex items-center justify-between px-4 pt-safe pb-2 pt-3" style={{ background: "#0a1520", borderBottom: "1px solid #0d1e2c" }}>
+        <button className="w-9 h-9 flex items-center justify-center rounded-full" style={{ background: "#0d1e2c" }}>
+          <Icon name="ChevronLeft" size={20} style={{ color: "#4a6070" }} />
+        </button>
+
+        <div className="flex items-center gap-2">
+          <img src="https://cdn.poehali.dev/projects/aa1808ba-e45f-437c-8925-20682e9a577e/files/3fa43031-b9e1-40e6-997b-435e174180c5.jpg"
+            alt="logo" className="w-7 h-7 rounded-full object-cover" style={{ border: "1.5px solid #00c2ff" }} />
+          <span className="font-bold text-base tracking-widest uppercase" style={{ fontFamily: "Oswald, sans-serif", color: "#e2f4ff" }}>
+            Chebur<span style={{ color: "#00c2ff" }}>ek</span>Studio
           </span>
         </div>
-        <nav className="hidden md:flex items-center gap-8">
-          {["Главная", "Функции", "О нас"].map(n => (
-            <a key={n} href="#" className="text-sm uppercase tracking-widest transition-colors duration-200 font-plex"
-              style={{ color: "var(--daw-muted)" }}
-              onMouseEnter={e => (e.currentTarget.style.color = "var(--daw-cyan)")}
-              onMouseLeave={e => (e.currentTarget.style.color = "var(--daw-muted)")}>
-              {n}
-            </a>
-          ))}
-        </nav>
-        <button
-          className="px-4 py-1.5 rounded text-sm font-medium uppercase tracking-widest transition-all duration-200 font-plex"
-          style={{ background: "var(--daw-cyan)", color: "var(--daw-bg)", fontSize: "0.75rem", letterSpacing: "0.1em" }}
-          onMouseEnter={e => { (e.currentTarget.style.boxShadow = "0 0 16px rgba(0,229,255,0.5)"); }}
-          onMouseLeave={e => { (e.currentTarget.style.boxShadow = "none"); }}
-        >
-          Открыть студию
+
+        <button className="w-9 h-9 flex items-center justify-center rounded-full" style={{ background: "#0d1e2c" }}>
+          <Icon name="Upload" size={18} style={{ color: "#4a6070" }} />
         </button>
-      </header>
+      </div>
 
-      {/* Hero */}
-      <section className="relative pt-28 pb-20 px-6 grid-bg overflow-hidden">
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute top-20 left-1/4 w-96 h-96 rounded-full opacity-5"
-            style={{ background: "radial-gradient(circle, var(--daw-cyan) 0%, transparent 70%)" }} />
-          <div className="absolute bottom-0 right-1/4 w-64 h-64 rounded-full opacity-5"
-            style={{ background: "radial-gradient(circle, #00e676 0%, transparent 70%)" }} />
+      {/* ── Timeline ruler ── */}
+      <div className="flex-shrink-0 flex items-center px-4 py-1.5" style={{ background: "#0a1520", borderBottom: "1px solid #0d1e2c" }}>
+        <div className="font-mono text-xs mr-3" style={{ color: "#4a6070", minWidth: 52 }}>
+          {isRec ? <span style={{ color: "#ef4444" }} className="recording-dot inline-block">● {formatTime(recorder.recTime)}</span> : "00:00.0"}
         </div>
-
-        <div className="max-w-5xl mx-auto">
-          <div className="fade-up-1 flex items-center gap-3 mb-6">
-            <div className="recording-dot w-2.5 h-2.5 rounded-full" style={{ background: "var(--daw-red)", boxShadow: "0 0 8px var(--daw-red)" }} />
-            <span className="font-mono text-xs uppercase tracking-widest" style={{ color: "var(--daw-muted)" }}>
-              REC • Мобильная студия записи
-            </span>
-          </div>
-
-          <h1 className="fade-up-2 font-oswald font-bold leading-none mb-6"
-            style={{ fontSize: "clamp(3rem, 8vw, 6.5rem)", color: "var(--daw-text)", letterSpacing: "-0.01em" }}>
-            ЗАПИСЫВАЙ<br />
-            <span style={{ color: "var(--daw-cyan)", textShadow: "0 0 40px rgba(0,229,255,0.3)" }}>ТРЕКИ</span>{" "}
-            <span style={{ WebkitTextStroke: "1px var(--daw-muted)", color: "transparent" }}>ВЕЗДЕ</span>
-          </h1>
-
-          <p className="fade-up-3 max-w-lg text-lg leading-relaxed mb-10 font-plex"
-            style={{ color: "var(--daw-muted)", fontWeight: 300 }}>
-            Профессиональная студия в твоём телефоне. Reverb, Delay, Компрессор —
-            звучи как в настоящей студии.
-          </p>
-
-          <div className="fade-up-4 flex flex-wrap gap-4">
-            <button
-              onClick={() => document.getElementById("recorder")?.scrollIntoView({ behavior: "smooth" })}
-              className="flex items-center gap-2 px-7 py-3.5 rounded-lg font-medium transition-all duration-300 font-plex"
-              style={{ background: "var(--daw-red)", color: "#fff", fontSize: "0.9rem" }}
-              onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 0 32px rgba(255,23,68,0.4)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
-              onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0)"; }}
-            >
-              <div className="w-3 h-3 rounded-full bg-white recording-dot" />
-              Начать запись
-            </button>
-            <button
-              className="flex items-center gap-2 px-7 py-3.5 rounded-lg font-medium transition-all duration-300 font-plex"
-              style={{ background: "transparent", color: "var(--daw-text)", fontSize: "0.9rem", border: "1px solid var(--daw-border)" }}
-              onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--daw-cyan)"; e.currentTarget.style.color = "var(--daw-cyan)"; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--daw-border)"; e.currentTarget.style.color = "var(--daw-text)"; }}
-            >
-              <Icon name="Headphones" size={16} />
-              Демо-трек
-            </button>
-          </div>
-        </div>
-      </section>
-
-      {/* Recorder */}
-      <section className="px-6 py-12" id="recorder">
-        <div className="max-w-5xl mx-auto fade-up-3">
-          <div className="text-center mb-8">
-            <span className="font-mono text-xs uppercase tracking-widest px-3 py-1 rounded-full" style={{ color: "var(--daw-red)", background: "rgba(255,23,68,0.08)", border: "1px solid rgba(255,23,68,0.2)" }}>
-              Live Recording
-            </span>
-            <h2 className="font-oswald font-bold mt-4" style={{ fontSize: "clamp(1.8rem, 3vw, 2.5rem)", color: "var(--daw-text)" }}>
-              СТУДИЯ <span style={{ color: "var(--daw-cyan)" }}>В БРАУЗЕРЕ</span>
-            </h2>
-          </div>
-          <RecorderPanel />
-        </div>
-      </section>
-
-      {/* Features */}
-      <section id="features" className="px-6 py-16">
-        <div className="max-w-5xl mx-auto">
-          <div className="text-center mb-12 fade-up-1">
-            <span className="font-mono text-xs uppercase tracking-widest px-3 py-1 rounded-full" style={{ color: "var(--daw-cyan)", background: "rgba(0,229,255,0.08)", border: "1px solid rgba(0,229,255,0.2)" }}>
-              Эффекты обработки
-            </span>
-            <h2 className="font-oswald font-bold mt-4 mb-3" style={{ fontSize: "clamp(2rem, 4vw, 3rem)", color: "var(--daw-text)", letterSpacing: "0.02em" }}>
-              ПРОФЕССИОНАЛЬНЫЙ<br />
-              <span style={{ color: "var(--daw-cyan)" }}>ЗВУК</span> В ТВОИХ РУКАХ
-            </h2>
-            <p className="max-w-md mx-auto" style={{ color: "var(--daw-muted)", fontWeight: 300 }}>
-              Нажми на карточку эффекта — настрой звучание прямо здесь
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {features.map((f, i) => (
-              <EffectCard key={i} {...f} delay={String(i + 1)} />
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Stats */}
-      <section className="px-6 py-16" style={{ background: "var(--daw-surface)", borderTop: "1px solid var(--daw-border)", borderBottom: "1px solid var(--daw-border)" }}>
-        <div className="max-w-5xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
-          {[
-            { num: "48", unit: "kHz", label: "Частота дискретизации" },
-            { num: "32", unit: "bit", label: "Глубина записи" },
-            { num: "6", unit: "FX", label: "Встроенных эффектов" },
-            { num: "∞", unit: "TRK", label: "Треков в проекте" },
-          ].map((s, i) => (
-            <div key={i} className={`fade-up-${i + 1}`}>
-              <div className="font-oswald font-bold" style={{ fontSize: "clamp(2.5rem, 5vw, 3.5rem)", color: "var(--daw-cyan)", lineHeight: 1, textShadow: "0 0 20px rgba(0,229,255,0.3)" }}>
-                {s.num}<span className="text-2xl ml-1" style={{ color: "var(--daw-muted)" }}>{s.unit}</span>
-              </div>
-              <div className="mt-2 text-sm font-plex" style={{ color: "var(--daw-muted)" }}>{s.label}</div>
+        <div className="flex-1 relative h-5 overflow-hidden" style={{ background: "#0d1e2c", borderRadius: 4 }}>
+          {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+            <div key={n} className="absolute top-0 h-full flex flex-col items-start pl-0.5" style={{ left: `${(n - 1) * 12.5}%`, width: "12.5%" }}>
+              <span className="font-mono text-[9px]" style={{ color: "#2a4050" }}>{n}</span>
+              <div className="w-px h-2 mt-auto" style={{ background: "#1a3040" }} />
             </div>
           ))}
+          <div className="absolute top-0 bottom-0 w-0.5 rounded" style={{ left: `${Math.min(95, (playhead / 10) % 96)}%`, background: "#00c2ff", boxShadow: "0 0 6px #00c2ff" }} />
         </div>
-      </section>
+      </div>
 
-      {/* CTA */}
-      <section className="px-6 py-24 text-center relative overflow-hidden">
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[400px] rounded-full opacity-[0.04]"
-            style={{ background: "radial-gradient(ellipse, var(--daw-cyan) 0%, transparent 70%)" }} />
-        </div>
-        <div className="max-w-2xl mx-auto relative">
-          <h2 className="font-oswald font-bold mb-6 fade-up-1" style={{ fontSize: "clamp(2.5rem, 5vw, 4rem)", color: "var(--daw-text)", letterSpacing: "0.02em" }}>
-            НАЧНИ ЗАПИСЫВАТЬ<br />
-            <span style={{ color: "var(--daw-cyan)", textShadow: "0 0 30px rgba(0,229,255,0.3)" }}>ПРЯМО СЕЙЧАС</span>
-          </h2>
-          <p className="text-lg mb-10 fade-up-2 font-plex" style={{ color: "var(--daw-muted)", fontWeight: 300 }}>
-            Бесплатно. Без ограничений по времени. Работает в браузере.
-          </p>
-          <button
-            className="fade-up-3 inline-flex items-center gap-3 px-10 py-4 rounded-xl font-medium text-lg transition-all duration-300 font-plex"
-            style={{ background: "var(--daw-cyan)", color: "var(--daw-bg)" }}
-            onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 0 48px rgba(0,229,255,0.4)"; e.currentTarget.style.transform = "translateY(-2px) scale(1.02)"; }}
-            onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "translateY(0) scale(1)"; }}
-          >
-            <Icon name="Mic" size={20} style={{ color: "var(--daw-bg)" }} />
-            Открыть студию бесплатно
-          </button>
-        </div>
-      </section>
-
-      {/* Footer */}
-      <footer className="px-6 py-8 text-center" style={{ borderTop: "1px solid var(--daw-border)" }}>
-        <div className="flex items-center justify-center gap-2 mb-3">
-          <div className="w-5 h-5 rounded flex items-center justify-center" style={{ background: "var(--daw-cyan)" }}>
-            <Icon name="Mic2" size={10} style={{ color: "var(--daw-bg)" }} />
+      {/* ── Tracks area ── */}
+      <div className="flex-1 overflow-y-auto" style={{ background: "#080f16" }}>
+        {tracks.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full gap-4 px-8 text-center">
+            <img src="https://cdn.poehali.dev/projects/aa1808ba-e45f-437c-8925-20682e9a577e/files/3fa43031-b9e1-40e6-997b-435e174180c5.jpg"
+              alt="cheburek" className="w-28 h-28 rounded-3xl object-cover opacity-60" style={{ border: "2px solid #0d1e2c" }} />
+            <p className="text-sm" style={{ color: "#2a4050" }}>Нажми <span style={{ color: "#00c2ff" }}>+</span> чтобы добавить дорожку<br />или <span style={{ color: "#ef4444" }}>●</span> чтобы начать запись</p>
           </div>
-          <span className="font-oswald font-semibold tracking-widest uppercase text-sm" style={{ color: "var(--daw-text)" }}>
-            Track<span style={{ color: "var(--daw-cyan)" }}>Studio</span>
-          </span>
+        ) : tracks.map(track => {
+          const isActive = track.id === activeTrackId;
+          const isPlaying = track.id === playingTrackId;
+          return (
+            <div
+              key={track.id}
+              className="flex items-stretch transition-all"
+              style={{ borderBottom: "1px solid #0d1e2c", background: isActive ? "rgba(0,194,255,0.04)" : "transparent" }}
+              onClick={() => setActiveTrackId(track.id)}
+            >
+              {/* Left panel */}
+              <div className="flex-shrink-0 flex flex-col justify-center gap-1.5 px-3 py-2.5" style={{ width: 140, borderRight: "1px solid #0d1e2c" }}>
+                <div className="flex items-center gap-2">
+                  <Icon name={track.icon} size={16} style={{ color: track.color }} />
+                  <span className="text-sm font-semibold truncate" style={{ color: track.color, maxWidth: 95 }}>{track.name}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    className="flex items-center gap-1 px-2 py-1 rounded-full text-xs font-bold transition-all"
+                    style={{ background: "#0d1e2c", color: "#00c2ff", border: "1px solid #1a3040" }}
+                    onClick={e => { e.stopPropagation(); setShowFx(track.id); }}
+                  >
+                    +Fx
+                  </button>
+                  {track.fx.map(f => (
+                    <span key={f} className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: "#00c2ff22", color: "#00c2ff" }}>{f}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Waveform / record area */}
+              <div className="flex-1 flex items-center px-2 relative" style={{ minHeight: 64 }}>
+                {isRec && isActive ? (
+                  /* live vu while recording */
+                  <div className="flex items-end gap-[2px] w-full" style={{ height: 40 }}>
+                    {recorder.vuLevels.map((v, i) => (
+                      <div key={i} className="flex-1 rounded-sm transition-all" style={{ height: `${Math.max(4, v)}%`, background: `${track.color}cc`, boxShadow: v > 50 ? `0 0 4px ${track.color}` : "none" }} />
+                    ))}
+                  </div>
+                ) : track.hasAudio && track.waveform ? (
+                  <div
+                    className="flex items-end gap-[2px] w-full rounded-xl overflow-hidden cursor-pointer"
+                    style={{ height: 44, background: track.color + "15", padding: "4px 6px" }}
+                    onClick={e => { e.stopPropagation(); togglePlayTrack(track); }}
+                  >
+                    {track.waveform.map((v, i) => (
+                      <div key={i} className="flex-1 rounded-sm transition-all"
+                        style={{ height: `${v}%`, background: isPlaying ? track.color : track.color + "88", boxShadow: isPlaying && v > 50 ? `0 0 3px ${track.color}` : "none" }} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="w-full flex items-center justify-center" style={{ height: 44 }}>
+                    <span className="text-xs" style={{ color: "#2a4050" }}>Пусто — нажми ● для записи</span>
+                  </div>
+                )}
+
+                {/* play indicator */}
+                {isPlaying && (
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 px-2 py-1 rounded-full" style={{ background: track.color + "33" }}>
+                    <div className="w-1.5 h-1.5 rounded-full recording-dot" style={{ background: track.color }} />
+                    <span className="font-mono text-[10px]" style={{ color: track.color }}>PLAY</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Delete */}
+              <button className="flex-shrink-0 w-8 flex items-center justify-center transition-all"
+                style={{ color: "#2a4050" }}
+                onClick={e => { e.stopPropagation(); deleteTrack(track.id); }}
+                onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
+                onMouseLeave={e => e.currentTarget.style.color = "#2a4050"}>
+                <Icon name="X" size={14} />
+              </button>
+            </div>
+          );
+        })}
+
+        {/* Add track row */}
+        <button
+          className="w-full flex items-center justify-center py-5 transition-all"
+          style={{ background: "transparent", border: "none" }}
+          onMouseEnter={e => e.currentTarget.style.background = "rgba(0,194,255,0.04)"}
+          onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+          onClick={() => setShowAddSheet(true)}
+        >
+          <div className="w-9 h-9 rounded-full flex items-center justify-center" style={{ background: "#0d1e2c", border: "1px solid #1a3040" }}>
+            <Icon name="Plus" size={20} style={{ color: "#00c2ff" }} />
+          </div>
+        </button>
+      </div>
+
+      {/* ── Bottom FX Bar ── */}
+      <div className="flex-shrink-0 flex items-center justify-between px-5 py-2.5" style={{ background: "#0a1520", borderTop: "1px solid #0d1e2c" }}>
+        <button className="flex items-center gap-1.5 px-3 py-2 rounded-xl transition-all"
+          style={{ background: "#0d1e2c" }}
+          onClick={() => setShowFx(activeTrackId)}
+          onMouseEnter={e => e.currentTarget.style.background = "#132030"}
+          onMouseLeave={e => e.currentTarget.style.background = "#0d1e2c"}>
+          <Icon name="Mic" size={16} style={{ color: "#00c2ff" }} />
+          <span className="text-xs font-bold" style={{ color: "#00c2ff" }}>+Fx</span>
+        </button>
+
+        <button className="flex items-center gap-1.5 px-3 py-2 rounded-xl transition-all"
+          style={{ background: "#0d1e2c" }}
+          onClick={() => setShowAutoPitch(true)}
+          onMouseEnter={e => e.currentTarget.style.background = "#132030"}
+          onMouseLeave={e => e.currentTarget.style.background = "#0d1e2c"}>
+          <Icon name="TrendingUp" size={16} style={{ color: "#ef4444" }} />
+          <span className="text-xs font-bold" style={{ color: "#ef4444" }}>AutoPitch</span>
+        </button>
+
+        <button className="flex items-center gap-1.5 px-3 py-2 rounded-xl transition-all"
+          style={{ background: "#0d1e2c" }}
+          onClick={() => fileInputRef.current?.click()}
+          onMouseEnter={e => e.currentTarget.style.background = "#132030"}
+          onMouseLeave={e => e.currentTarget.style.background = "#0d1e2c"}>
+          <Icon name="Upload" size={16} style={{ color: "#f59e0b" }} />
+          <span className="text-xs font-bold" style={{ color: "#f59e0b" }}>Импорт</span>
+        </button>
+        <input ref={fileInputRef} type="file" accept="audio/*,video/*" className="hidden" onChange={handleImport} />
+      </div>
+
+      {/* ── Transport Bar ── */}
+      <div className="flex-shrink-0 flex items-center justify-between px-6 pb-safe py-3" style={{ background: "#060d14", borderTop: "1px solid #0d1e2c" }}>
+        <button className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#0d1e2c" }}
+          onClick={() => { setPlaying(false); setPlayhead(0); }}>
+          <Icon name="SkipBack" size={18} style={{ color: "#4a6070" }} />
+        </button>
+
+        <button className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#0d1e2c" }}
+          onClick={() => setPlaying(false)}>
+          <Icon name="Rewind" size={18} style={{ color: "#4a6070" }} />
+        </button>
+
+        {/* Big REC button */}
+        <button
+          className="w-16 h-16 rounded-full flex items-center justify-center transition-all"
+          style={{
+            background: isRec ? "#ff1744" : isPaused ? "#ff6d00" : "#ef4444",
+            boxShadow: isRec ? "0 0 0 4px rgba(255,23,68,0.25), 0 0 24px rgba(255,23,68,0.4)" : "none",
+          }}
+          onClick={handleRecord}
+        >
+          {isRec ? (
+            <div className="w-6 h-6 rounded recording-dot" style={{ background: "#fff" }} />
+          ) : isPaused ? (
+            <Icon name="Play" size={24} style={{ color: "#fff" }} />
+          ) : (
+            <div className="w-6 h-6 rounded-full" style={{ background: "#fff" }} />
+          )}
+        </button>
+
+        <button className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: isRec ? "rgba(0,194,255,0.1)" : "#0d1e2c", border: isRec ? "1px solid rgba(0,194,255,0.3)" : "none" }}
+          onClick={() => setPlaying(v => !v)}>
+          <Icon name={playing ? "Pause" : "Play"} size={18} style={{ color: playing ? "#00c2ff" : "#4a6070" }} />
+        </button>
+
+        <button className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: "#0d1e2c" }}>
+          <Icon name="FastForward" size={18} style={{ color: "#4a6070" }} />
+        </button>
+      </div>
+
+      {/* ── Error toast ── */}
+      {recorder.error && (
+        <div className="fixed bottom-24 left-4 right-4 z-50 px-4 py-3 rounded-2xl flex items-center gap-3"
+          style={{ background: "rgba(255,23,68,0.15)", border: "1px solid rgba(255,23,68,0.4)", backdropFilter: "blur(10px)" }}>
+          <Icon name="AlertCircle" size={16} style={{ color: "#ff1744" }} />
+          <span className="text-sm" style={{ color: "#ff6b6b" }}>{recorder.error}</span>
         </div>
-        <p className="text-xs font-mono" style={{ color: "var(--daw-muted)" }}>
-          © 2026 TrackStudio · Профессиональная запись в твоём телефоне
-        </p>
-      </footer>
+      )}
+
+      {/* ── Sheets / Modals ── */}
+      {showAddSheet && <AddTrackSheet onClose={() => setShowAddSheet(false)} onAdd={addTrack} />}
+      {showFx !== null && <FxSheet trackName={tracks.find(t => t.id === showFx)?.name || "Дорожка"} onClose={() => setShowFx(null)} />}
+      {showAutoPitch && <AutoPitchModal onClose={() => setShowAutoPitch(false)} />}
     </div>
   );
 }
