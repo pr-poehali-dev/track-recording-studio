@@ -16,6 +16,7 @@ interface Track {
   fx: string[];
   muted: boolean;
   solo: boolean;
+  volume: number;
 }
 
 /* ─── Waveform bar ───────────────────────────────────────── */
@@ -318,6 +319,56 @@ export default function Index() {
 
   const activeTrack = tracks.find(t => t.id === activeTrackId);
 
+  // Rename
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  const startRename = (track: Track, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenamingId(track.id);
+    setRenameValue(track.name);
+    setTimeout(() => renameInputRef.current?.select(), 50);
+  };
+
+  const commitRename = () => {
+    if (renamingId !== null && renameValue.trim()) {
+      setTracks(prev => prev.map(t => t.id === renamingId ? { ...t, name: renameValue.trim() } : t));
+    }
+    setRenamingId(null);
+  };
+
+  // Volume
+  const setTrackVolume = (id: number, vol: number) => {
+    setTracks(prev => prev.map(t => t.id === id ? { ...t, volume: vol } : t));
+    if (audioRefs.current[id]) audioRefs.current[id].volume = vol / 100;
+  };
+
+  // Drag-and-drop
+  const dragIdRef = useRef<number | null>(null);
+  const dragOverIdRef = useRef<number | null>(null);
+
+  const onDragStart = (id: number) => { dragIdRef.current = id; };
+  const onDragOver = (e: React.DragEvent, id: number) => {
+    e.preventDefault();
+    dragOverIdRef.current = id;
+  };
+  const onDrop = () => {
+    const fromId = dragIdRef.current;
+    const toId = dragOverIdRef.current;
+    if (fromId === null || toId === null || fromId === toId) return;
+    setTracks(prev => {
+      const arr = [...prev];
+      const fromIdx = arr.findIndex(t => t.id === fromId);
+      const toIdx = arr.findIndex(t => t.id === toId);
+      const [item] = arr.splice(fromIdx, 1);
+      arr.splice(toIdx, 0, item);
+      return arr;
+    });
+    dragIdRef.current = null;
+    dragOverIdRef.current = null;
+  };
+
   /* ─ playhead tick ─ */
   useEffect(() => {
     if (playing) {
@@ -340,6 +391,7 @@ export default function Index() {
       fx: [],
       muted: false,
       solo: false,
+      volume: 80,
       waveform: Array.from({ length: 60 }, () => 0),
     };
     setTracks(prev => [...prev, newTrack]);
@@ -352,7 +404,7 @@ export default function Index() {
       if (!activeTrackId) {
         counterRef.current += 1;
         const id = counterRef.current;
-        setTracks(prev => [...prev, { id, name: `Голос/Аудио ${id}`, color: "#ef4444", icon: "Mic", hasAudio: false, fx: [], muted: false, solo: false, waveform: Array.from({ length: 60 }, () => 0) }]);
+        setTracks(prev => [...prev, { id, name: `Голос/Аудио ${id}`, color: "#ef4444", icon: "Mic", hasAudio: false, fx: [], muted: false, solo: false, volume: 80, waveform: Array.from({ length: 60 }, () => 0) }]);
         setActiveTrackId(id);
       }
       await recorder.start();
@@ -392,7 +444,7 @@ export default function Index() {
     const waveform = Array.from({ length: 60 }, () => Math.random() * 80 + 15);
     counterRef.current += 1;
     const id = counterRef.current;
-    setTracks(prev => [...prev, { id, name: file.name.replace(/\.[^.]+$/, ""), color: "#06b6d4", icon: "FileMusic", hasAudio: true, url, duration: "—", waveform, fx: [], muted: false, solo: false }]);
+    setTracks(prev => [...prev, { id, name: file.name.replace(/\.[^.]+$/, ""), color: "#06b6d4", icon: "FileMusic", hasAudio: true, url, duration: "—", waveform, fx: [], muted: false, solo: false, volume: 80 }]);
     setActiveTrackId(id);
     e.target.value = "";
   };
@@ -458,76 +510,128 @@ export default function Index() {
         ) : tracks.map(track => {
           const isActive = track.id === activeTrackId;
           const isPlaying = track.id === playingTrackId;
+          const isRenaming = renamingId === track.id;
           return (
             <div
               key={track.id}
-              className="flex items-stretch transition-all"
-              style={{ borderBottom: "1px solid #0d1e2c", background: isActive ? "rgba(0,194,255,0.04)" : "transparent" }}
+              draggable
+              onDragStart={() => onDragStart(track.id)}
+              onDragOver={e => onDragOver(e, track.id)}
+              onDrop={onDrop}
+              className="flex flex-col transition-all"
+              style={{ borderBottom: "1px solid #0d1e2c", background: isActive ? "rgba(0,194,255,0.05)" : "transparent", cursor: "grab" }}
               onClick={() => setActiveTrackId(track.id)}
             >
-              {/* Left panel */}
-              <div className="flex-shrink-0 flex flex-col justify-center gap-1.5 px-3 py-2.5" style={{ width: 140, borderRight: "1px solid #0d1e2c" }}>
-                <div className="flex items-center gap-2">
-                  <Icon name={track.icon} size={16} style={{ color: track.color }} />
-                  <span className="text-sm font-semibold truncate" style={{ color: track.color, maxWidth: 95 }}>{track.name}</span>
+              <div className="flex items-stretch">
+                {/* Drag handle */}
+                <div className="flex-shrink-0 flex items-center px-1.5" style={{ color: "#1e3040" }}>
+                  <Icon name="GripVertical" size={14} />
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    className="flex items-center gap-1 px-2 py-1 rounded-full text-xs font-bold transition-all"
-                    style={{ background: "#0d1e2c", color: "#00c2ff", border: "1px solid #1a3040" }}
-                    onClick={e => { e.stopPropagation(); setShowFx(track.id); }}
-                  >
-                    +Fx
-                  </button>
-                  {track.fx.map(f => (
-                    <span key={f} className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: "#00c2ff22", color: "#00c2ff" }}>{f}</span>
-                  ))}
+
+                {/* Left panel */}
+                <div className="flex-shrink-0 flex flex-col justify-center gap-1.5 px-2 py-2.5" style={{ width: 130, borderRight: "1px solid #0d1e2c" }}>
+                  <div className="flex items-center gap-1.5">
+                    <Icon name={track.icon} size={14} style={{ color: track.color, flexShrink: 0 }} />
+                    {isRenaming ? (
+                      <input
+                        ref={renameInputRef}
+                        value={renameValue}
+                        onChange={e => setRenameValue(e.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={e => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingId(null); }}
+                        onClick={e => e.stopPropagation()}
+                        className="flex-1 text-xs font-semibold rounded px-1 py-0.5 outline-none"
+                        style={{ background: "#0d1e2c", color: track.color, border: `1px solid ${track.color}66`, minWidth: 0 }}
+                        autoFocus
+                      />
+                    ) : (
+                      <span
+                        className="text-xs font-semibold truncate flex-1 cursor-text"
+                        style={{ color: track.color }}
+                        onDoubleClick={e => startRename(track, e)}
+                        title="Двойной клик — переименовать"
+                      >
+                        {track.name}
+                      </span>
+                    )}
+                    <button onClick={e => startRename(track, e)} className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                      style={{ color: "#2a4050" }}
+                      onMouseEnter={e => e.currentTarget.style.color = "#00c2ff"}
+                      onMouseLeave={e => e.currentTarget.style.color = "#2a4050"}>
+                      <Icon name="Pencil" size={10} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all"
+                      style={{ background: "#0d1e2c", color: "#00c2ff", border: "1px solid #1a3040" }}
+                      onClick={e => { e.stopPropagation(); setShowFx(track.id); }}
+                    >
+                      +Fx
+                    </button>
+                  </div>
                 </div>
+
+                {/* Waveform / record area */}
+                <div className="flex-1 flex items-center px-2 relative" style={{ minHeight: 60 }}>
+                  {isRec && isActive ? (
+                    <div className="flex items-end gap-[2px] w-full" style={{ height: 38 }}>
+                      {recorder.vuLevels.map((v, i) => (
+                        <div key={i} className="flex-1 rounded-sm" style={{ height: `${Math.max(4, v)}%`, background: `${track.color}cc`, transition: "height 0.05s", boxShadow: v > 50 ? `0 0 4px ${track.color}` : "none" }} />
+                      ))}
+                    </div>
+                  ) : track.hasAudio && track.waveform ? (
+                    <div
+                      className="flex items-end gap-[2px] w-full rounded-xl overflow-hidden cursor-pointer"
+                      style={{ height: 42, background: track.color + "15", padding: "4px 6px" }}
+                      onClick={e => { e.stopPropagation(); togglePlayTrack(track); }}
+                    >
+                      {track.waveform.map((v, i) => (
+                        <div key={i} className="flex-1 rounded-sm"
+                          style={{ height: `${v}%`, background: isPlaying ? track.color : track.color + "88", transition: "background 0.3s", boxShadow: isPlaying && v > 50 ? `0 0 3px ${track.color}` : "none" }} />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="w-full flex items-center justify-center" style={{ height: 42 }}>
+                      <span className="text-xs" style={{ color: "#2a4050" }}>Пусто — нажми ● для записи</span>
+                    </div>
+                  )}
+                  {isPlaying && (
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 px-2 py-1 rounded-full" style={{ background: track.color + "33" }}>
+                      <div className="w-1.5 h-1.5 rounded-full recording-dot" style={{ background: track.color }} />
+                      <span className="font-mono text-[10px]" style={{ color: track.color }}>PLAY</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Delete */}
+                <button className="flex-shrink-0 w-8 flex items-center justify-center transition-all"
+                  style={{ color: "#2a4050" }}
+                  onClick={e => { e.stopPropagation(); deleteTrack(track.id); }}
+                  onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
+                  onMouseLeave={e => e.currentTarget.style.color = "#2a4050"}>
+                  <Icon name="X" size={14} />
+                </button>
               </div>
 
-              {/* Waveform / record area */}
-              <div className="flex-1 flex items-center px-2 relative" style={{ minHeight: 64 }}>
-                {isRec && isActive ? (
-                  /* live vu while recording */
-                  <div className="flex items-end gap-[2px] w-full" style={{ height: 40 }}>
-                    {recorder.vuLevels.map((v, i) => (
-                      <div key={i} className="flex-1 rounded-sm transition-all" style={{ height: `${Math.max(4, v)}%`, background: `${track.color}cc`, boxShadow: v > 50 ? `0 0 4px ${track.color}` : "none" }} />
-                    ))}
+              {/* Volume slider row */}
+              {isActive && (
+                <div className="flex items-center gap-2 px-4 pb-2.5 pt-0.5" onClick={e => e.stopPropagation()}>
+                  <Icon name="Volume1" size={12} style={{ color: "#2a4050", flexShrink: 0 }} />
+                  <div className="flex-1 relative h-3 flex items-center">
+                    <div className="w-full h-1 rounded-full" style={{ background: "#0d1e2c" }}>
+                      <div className="h-full rounded-full" style={{ width: `${track.volume}%`, background: `linear-gradient(90deg, ${track.color}88, ${track.color})`, transition: "width 0.05s" }} />
+                    </div>
+                    <input
+                      type="range" min={0} max={100} value={track.volume}
+                      onChange={e => { e.stopPropagation(); setTrackVolume(track.id, +e.target.value); }}
+                      className="absolute inset-0 w-full opacity-0 cursor-pointer h-full"
+                    />
                   </div>
-                ) : track.hasAudio && track.waveform ? (
-                  <div
-                    className="flex items-end gap-[2px] w-full rounded-xl overflow-hidden cursor-pointer"
-                    style={{ height: 44, background: track.color + "15", padding: "4px 6px" }}
-                    onClick={e => { e.stopPropagation(); togglePlayTrack(track); }}
-                  >
-                    {track.waveform.map((v, i) => (
-                      <div key={i} className="flex-1 rounded-sm transition-all"
-                        style={{ height: `${v}%`, background: isPlaying ? track.color : track.color + "88", boxShadow: isPlaying && v > 50 ? `0 0 3px ${track.color}` : "none" }} />
-                    ))}
-                  </div>
-                ) : (
-                  <div className="w-full flex items-center justify-center" style={{ height: 44 }}>
-                    <span className="text-xs" style={{ color: "#2a4050" }}>Пусто — нажми ● для записи</span>
-                  </div>
-                )}
-
-                {/* play indicator */}
-                {isPlaying && (
-                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 px-2 py-1 rounded-full" style={{ background: track.color + "33" }}>
-                    <div className="w-1.5 h-1.5 rounded-full recording-dot" style={{ background: track.color }} />
-                    <span className="font-mono text-[10px]" style={{ color: track.color }}>PLAY</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Delete */}
-              <button className="flex-shrink-0 w-8 flex items-center justify-center transition-all"
-                style={{ color: "#2a4050" }}
-                onClick={e => { e.stopPropagation(); deleteTrack(track.id); }}
-                onMouseEnter={e => e.currentTarget.style.color = "#ef4444"}
-                onMouseLeave={e => e.currentTarget.style.color = "#2a4050"}>
-                <Icon name="X" size={14} />
-              </button>
+                  <span className="font-mono text-[10px] w-6 text-right" style={{ color: "#4a6070" }}>{track.volume}</span>
+                  <Icon name="Volume2" size={12} style={{ color: "#2a4050", flexShrink: 0 }} />
+                </div>
+              )}
             </div>
           );
         })}
