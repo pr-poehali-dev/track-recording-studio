@@ -5,16 +5,6 @@ import Cabinet from "./Cabinet";
 /* ─── Types ─────────────────────────────────────────────── */
 type RecordingState = "idle" | "recording" | "paused" | "done";
 
-interface SavedTrack {
-  id: number;
-  name: string;
-  url: string;
-  duration: string;
-  color: string;
-  mimeType: string;
-  savedAt: string;
-}
-
 interface Track {
   id: number;
   name: string;
@@ -1108,35 +1098,54 @@ const AnimeSplash = ({ onDone }: { onDone: () => void }) => {
   );
 };
 
+/* ─── Save Dialog ────────────────────────────────────────── */
+const SaveDialog = ({
+  onSave, onDiscard, onContinue,
+}: { onSave: () => void; onDiscard: () => void; onContinue: () => void }) => (
+  <div className="fixed inset-0 z-[100] flex items-end justify-center" style={{ background: "rgba(0,0,0,0.8)" }}>
+    <div className="w-full rounded-t-3xl overflow-hidden pb-safe" style={{ background: "#0a1520", maxWidth: 480 }}>
+      <div className="flex justify-center pt-3 pb-1"><div className="w-10 h-1 rounded-full" style={{ background: "#2a3540" }} /></div>
+      <div className="px-5 pt-3 pb-2 text-center">
+        <span className="font-bold text-lg" style={{ color: "#e2f4ff", fontFamily: "Oswald, sans-serif" }}>Сохранить трек?</span>
+        <p className="text-sm mt-1" style={{ color: "#4a6070" }}>Трек попадёт в твой кабинет</p>
+      </div>
+      <div className="flex flex-col gap-2 px-5 pb-6 pt-2">
+        <button onClick={onSave}
+          className="w-full py-4 rounded-2xl font-bold text-base"
+          style={{ background: "#00c2ff", color: "#000", fontFamily: "Oswald, sans-serif", letterSpacing: "0.06em" }}>
+          <Icon name="Save" size={16} style={{ display: "inline", marginRight: 8 }} />
+          СОХРАНИТЬ И ВЫЙТИ
+        </button>
+        <button onClick={onContinue}
+          className="w-full py-3.5 rounded-2xl font-bold text-sm"
+          style={{ background: "#0d1e2c", color: "#e2f4ff", border: "1px solid #1e3040" }}>
+          Продолжить запись
+        </button>
+        <button onClick={onDiscard}
+          className="w-full py-3 rounded-2xl font-medium text-sm"
+          style={{ background: "transparent", color: "#4a6070" }}>
+          Выйти без сохранения
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
 /* ─── Main App ───────────────────────────────────────────── */
 export default function Index() {
   const [showSplash, setShowSplash] = useState(true);
-  const [showCabinet, setShowCabinet] = useState(false);
-  const defaultTrackAdded = useRef(false);
-  const [savedTracks, setSavedTracks] = useState<SavedTrack[]>(() => {
-    try { return JSON.parse(localStorage.getItem("cheburek_saved_tracks") || "[]"); } catch { return []; }
+  const [screen, setScreen] = useState<"cabinet" | "daw">("cabinet");
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
+  // Projects = сохранённые треки в Кабинете
+  const [projects, setProjects] = useState<import("./Cabinet").Project[]>(() => {
+    try { return JSON.parse(localStorage.getItem("cheburek_projects") || "[]"); } catch { return []; }
   });
-  const savedCounterRef = useRef(savedTracks.length);
-  const [tracks, setTracks] = useState<Track[]>(() => {
-    // Дорожка по умолчанию при первом входе
-    if (!defaultTrackAdded.current) {
-      defaultTrackAdded.current = true;
-      return [{
-        id: 1,
-        name: "Голос/Аудио",
-        color: "#ef4444",
-        icon: "Mic",
-        type: "voice",
-        hasAudio: false,
-        fx: [],
-        muted: false,
-        solo: false,
-        volume: 80,
-        waveform: Array.from({ length: 60 }, () => 0),
-      }];
-    }
-    return [];
-  });
+  const projectCounterRef = useRef(projects.length + 1);
+  const [projectName, setProjectName] = useState("Новый трек");
+
+  // DAW tracks (дорожки внутри текущего проекта)
+  const [tracks, setTracks] = useState<Track[]>([]);
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [showAddSheet, setShowAddSheet] = useState(false);
@@ -1146,7 +1155,7 @@ export default function Index() {
   const [showInstrument, setShowInstrument] = useState<string | null>(null);
   const [playingTrackId, setPlayingTrackId] = useState<number | null>(null);
   const audioRefs = useRef<Record<number, HTMLAudioElement>>({});
-  const counterRef = useRef(1); // начинаем с 1, т.к. дорожка по умолчанию имеет id=1
+  const counterRef = useRef(0);
   const playheadRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1405,107 +1414,144 @@ export default function Index() {
     setTracks(prev => prev.filter(t => t.id !== id));
   };
 
-  /* ─ save track to cabinet ─ */
-  const saveTrackToCabinet = (track: Track) => {
-    if (!track.url) return;
-    savedCounterRef.current += 1;
-    const now = new Date();
-    const savedAt = `${now.getDate()}.${now.getMonth() + 1}.${now.getFullYear()}`;
-    const mimeType = track.url.startsWith("blob") ? (
-      MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm" :
-      MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "audio/webm"
-    ) : "audio/webm";
+  /* ─ open new project in DAW ─ */
+  const openNewProject = () => {
+    setTracks([{ id: 1, name: "Голос/Аудио", color: "#ef4444", icon: "Mic", type: "voice", hasAudio: false, fx: [], muted: false, solo: false, volume: 80, waveform: Array.from({ length: 60 }, () => 0) }]);
+    counterRef.current = 1;
+    setActiveTrackId(1);
+    setProjectName("Новый трек " + projectCounterRef.current);
+    setPlayhead(0); setPlaying(false);
+    setScreen("daw");
+  };
 
-    const saved: SavedTrack = {
-      id: savedCounterRef.current,
-      name: track.name,
-      url: track.url,
-      duration: track.duration || "0:00",
-      color: track.color,
-      mimeType,
-      savedAt,
-    };
-    setSavedTracks(prev => {
-      const updated = [saved, ...prev];
-      localStorage.setItem("cheburek_saved_tracks", JSON.stringify(
-        updated.map(t => ({ ...t, url: "" })) // не сохраняем blob-url в localStorage
-      ));
-      return updated;
-    });
+  const openExistingProject = (id: number) => {
+    setEditingProjectId(id);
+    const p = projects.find(pr => pr.id === id);
+    if (!p) return;
+    setProjectName(p.name);
+    setTracks([{ id: 1, name: "Голос/Аудио", color: p.coverColor, icon: "Mic", type: "voice", hasAudio: !!p.audioUrl, url: p.audioUrl, duration: p.duration, fx: [], muted: false, solo: false, volume: 80, waveform: p.waveform || Array.from({ length: 60 }, () => Math.random() * 70 + 10) }]);
+    counterRef.current = 1;
+    setActiveTrackId(1);
+    setScreen("daw");
+  };
+
+  /* ─ save project ─ */
+  const doSaveProject = () => {
+    const audioTrack = tracks.find(t => t.hasAudio && t.url);
+    const now = new Date();
+    const createdAt = `${now.getDate()}.${now.getMonth() + 1}.${now.getFullYear()}`;
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm"
+      : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "audio/webm";
+    const colors = ["#ef4444","#f97316","#eab308","#22c55e","#06b6d4","#3b82f6","#8b5cf6","#ec4899"];
+
+    if (editingProjectId !== null) {
+      setProjects(prev => {
+        const updated = prev.map(p => p.id === editingProjectId ? {
+          ...p, name: projectName, audioUrl: audioTrack?.url, duration: audioTrack?.duration || "0:00",
+          trackCount: tracks.length, mimeType, waveform: audioTrack?.waveform,
+        } : p);
+        localStorage.setItem("cheburek_projects", JSON.stringify(updated.map(p => ({ ...p, audioUrl: undefined }))));
+        return updated;
+      });
+    } else {
+      const newId = projectCounterRef.current++;
+      const project: import("./Cabinet").Project = {
+        id: newId,
+        name: projectName,
+        coverColor: colors[newId % colors.length],
+        createdAt,
+        duration: audioTrack?.duration || "0:00",
+        trackCount: tracks.length,
+        audioUrl: audioTrack?.url,
+        mimeType,
+        waveform: audioTrack?.waveform,
+      };
+      setProjects(prev => {
+        const updated = [project, ...prev];
+        localStorage.setItem("cheburek_projects", JSON.stringify(updated.map(p => ({ ...p, audioUrl: undefined }))));
+        return updated;
+      });
+    }
+    setShowSaveDialog(false);
+    setEditingProjectId(null);
+    setScreen("cabinet");
+  };
+
+  const handleBackFromDAW = () => {
+    const hasAudio = tracks.some(t => t.hasAudio && t.url);
+    if (hasAudio) {
+      setShowSaveDialog(true);
+    } else {
+      setEditingProjectId(null);
+      setScreen("cabinet");
+    }
   };
 
   /* ─ cabinet helpers ─ */
-  const deleteFromCabinet = (id: number) => {
-    setSavedTracks(prev => prev.filter(t => t.id !== id));
+  const deleteProject = (id: number) => {
+    setProjects(prev => {
+      const updated = prev.filter(p => p.id !== id);
+      localStorage.setItem("cheburek_projects", JSON.stringify(updated.map(p => ({ ...p, audioUrl: undefined }))));
+      return updated;
+    });
   };
-
-  const renameInCabinet = (id: number, name: string) => {
-    setSavedTracks(prev => prev.map(t => t.id === id ? { ...t, name } : t));
+  const renameProject = (id: number, name: string) => {
+    setProjects(prev => {
+      const updated = prev.map(p => p.id === id ? { ...p, name } : p);
+      localStorage.setItem("cheburek_projects", JSON.stringify(updated.map(p => ({ ...p, audioUrl: undefined }))));
+      return updated;
+    });
   };
 
   const isRec = recorder.state === "recording";
   const isPaused = recorder.state === "paused";
 
-  if (showCabinet) {
+  /* ─── CABINET SCREEN ─ */
+  if (screen === "cabinet") {
     return (
-      <Cabinet
-        tracks={savedTracks}
-        onBack={() => setShowCabinet(false)}
-        onDeleteTrack={deleteFromCabinet}
-        onRenameTrack={renameInCabinet}
-      />
+      <>
+        {showSplash && <AnimeSplash onDone={() => setShowSplash(false)} />}
+        <Cabinet
+          projects={projects}
+          onNewProject={openNewProject}
+          onOpenProject={openExistingProject}
+          onDeleteProject={deleteProject}
+          onRenameProject={renameProject}
+        />
+      </>
     );
   }
 
+  /* ─── DAW SCREEN ─ */
   return (
     <div className="flex flex-col h-screen overflow-hidden select-none" style={{ background: "#080f16", color: "#e2f4ff", fontFamily: "IBM Plex Sans, sans-serif", maxWidth: 480, margin: "0 auto" }}>
 
-      {showSplash && <AnimeSplash onDone={() => setShowSplash(false)} />}
-
       {/* ── Top Bar ── */}
       <div className="flex-shrink-0 flex items-center justify-between px-4 pt-safe pb-2 pt-3" style={{ background: "#0a1520", borderBottom: "1px solid #0d1e2c" }}>
-        <button className="w-9 h-9 flex items-center justify-center rounded-full" style={{ background: "#0d1e2c" }}>
-          <Icon name="ChevronLeft" size={20} style={{ color: "#4a6070" }} />
+        <button className="w-9 h-9 flex items-center justify-center rounded-full" style={{ background: "#0d1e2c" }}
+          onClick={handleBackFromDAW}>
+          <Icon name="ChevronLeft" size={20} style={{ color: "#e2f4ff" }} />
         </button>
 
-        <div className="flex items-center gap-2">
-          <img src="https://cdn.poehali.dev/projects/aa1808ba-e45f-437c-8925-20682e9a577e/files/3fa43031-b9e1-40e6-997b-435e174180c5.jpg"
-            alt="logo" className="w-7 h-7 rounded-full object-cover" style={{ border: "1.5px solid #00c2ff" }} />
-          <span className="font-bold text-base tracking-widest uppercase" style={{ fontFamily: "Oswald, sans-serif", color: "#e2f4ff" }}>
-            Chebur<span style={{ color: "#00c2ff" }}>ek</span>Studio
-          </span>
-        </div>
+        {/* Editable project name */}
+        <input
+          value={projectName}
+          onChange={e => setProjectName(e.target.value)}
+          className="flex-1 mx-3 text-center font-bold text-sm outline-none bg-transparent"
+          style={{ fontFamily: "Oswald, sans-serif", color: "#e2f4ff", letterSpacing: "0.04em" }}
+          placeholder="Название трека"
+        />
 
-        <div className="flex items-center gap-2">
-          {/* Save button — active track with audio */}
-          {tracks.find(t => t.id === activeTrackId)?.hasAudio && (
-            <button
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full font-bold text-xs transition-all"
-              style={{ background: "rgba(0,230,118,0.15)", color: "#00e676", border: "1px solid rgba(0,230,118,0.4)" }}
-              onClick={() => { const t = tracks.find(tr => tr.id === activeTrackId); if (t) saveTrackToCabinet(t); }}
-              onMouseEnter={e => e.currentTarget.style.boxShadow = "0 0 12px rgba(0,230,118,0.3)"}
-              onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}
-            >
-              <Icon name="Save" size={13} />
-              Сохранить
-            </button>
-          )}
-          <button
-            className="w-9 h-9 flex items-center justify-center rounded-full relative transition-all"
-            style={{ background: "#0d1e2c", border: savedTracks.length > 0 ? "1px solid rgba(0,194,255,0.3)" : "none" }}
-            onClick={() => setShowCabinet(true)}
-            onMouseEnter={e => e.currentTarget.style.background = "#132030"}
-            onMouseLeave={e => e.currentTarget.style.background = "#0d1e2c"}
-          >
-            <Icon name="User" size={18} style={{ color: "#00c2ff" }} />
-            {savedTracks.length > 0 && (
-              <div className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center font-mono text-[9px] font-bold"
-                style={{ background: "#ef4444", color: "#fff" }}>
-                {savedTracks.length > 9 ? "9+" : savedTracks.length}
-              </div>
-            )}
-          </button>
-        </div>
+        <button
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full font-bold text-xs transition-all"
+          style={{ background: "rgba(0,194,255,0.15)", color: "#00c2ff", border: "1px solid rgba(0,194,255,0.4)", flexShrink: 0 }}
+          onClick={handleBackFromDAW}
+          onMouseEnter={e => e.currentTarget.style.boxShadow = "0 0 12px rgba(0,194,255,0.3)"}
+          onMouseLeave={e => e.currentTarget.style.boxShadow = "none"}
+        >
+          <Icon name="Save" size={13} />
+          Сохранить
+        </button>
       </div>
 
       {/* ── Timeline ruler ── */}
@@ -1817,6 +1863,15 @@ export default function Index() {
       {(showInstrument === "vst" || showInstrument === "looper") && <PianoPanel onClose={() => setShowInstrument(null)} />}
       {showInstrument === "drums" && <DrumPanel onClose={() => setShowInstrument(null)} />}
       {showInstrument === "sampler" && <SamplerPanel onClose={() => setShowInstrument(null)} onImport={() => fileInputRef.current?.click()} />}
+
+      {/* ── Save Dialog ── */}
+      {showSaveDialog && (
+        <SaveDialog
+          onSave={doSaveProject}
+          onDiscard={() => { setShowSaveDialog(false); setEditingProjectId(null); setScreen("cabinet"); }}
+          onContinue={() => setShowSaveDialog(false)}
+        />
+      )}
     </div>
   );
 }
